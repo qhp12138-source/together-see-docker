@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>一起See · Together See</title>
+    <meta name="description" content="创建房间，粘贴视频链接，一起同步观看。" />
+    <meta name="theme-color" content="#080b12" />
+    <link rel="icon" type="image/svg+xml" href="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" />
+    <link rel="stylesheet" href="./assets/css/main.css?v=20260904-bilibili-fallback" />
+  </head>
+  <body data-page="home">
+    <div class="page-shell home-page">
+      <div class="background-grid"></div>
+      <div class="background-orb orb-cyan"></div>
+      <div class="background-orb orb-orange"></div>
+
+      <header class="site-header">
+        <a class="brand" href="./index.html" aria-label="一起See 首页">
+          <span class="brand-mark" aria-hidden="true"><img src="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" alt="" /></span>
+          <span class="brand-copy"><strong>一起See</strong><small>Together See</small></span>
+        </a>
+      </header>
+
+      <main class="home-main">
+        <section class="hero-minimal">
+          <p class="eyebrow">一起See · Together See</p>
+          <h1>发个链接，一起看。</h1>
+          <p class="hero-subtitle">创建房间，粘贴视频链接，解析后同步播放。</p>
+
+          <div class="home-actions glass-card">
+            <form class="home-form" data-create-room-form>
+              <label for="roomNameInput">创建房间</label>
+              <div class="input-row">
+                <input id="roomNameInput" name="roomName" maxlength="64" placeholder="输入房间名" />
+                <button class="button primary" type="submit">创建</button>
+              </div>
+              <p class="home-form-error" data-create-room-error role="alert"></p>
+            </form>
+
+            <form class="home-form" data-room-form>
+              <label for="roomCodeInput">加入房间</label>
+              <div class="input-row">
+                <input id="roomCodeInput" name="room" maxlength="64" placeholder="输入房间名" />
+                <button class="button secondary" type="submit">加入</button>
+              </div>
+              <p class="home-form-error" data-join-room-error role="alert"></p>
+            </form>
+          </div>
+
+          <div class="minimal-tags" aria-label="功能标签">
+            <span>同步</span><span>聊天</span><span>链接解析</span>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-disclaimer" aria-label="免责声明">
+        <strong>免责声明</strong>
+        <p>本站仅供学习交流与技术研究，不提供、不上传或存储任何视频文件。房间中的链接、弹幕及其他内容均由用户自行提交，请仅使用已获合法授权或依法可使用的内容，并遵守著作权、网络信息内容管理及第三方平台规则。本站不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。</p>
+      </footer>
+    </div>
+
+    <div class="room-dialog-modal home-entry-modal" data-home-create-modal hidden aria-hidden="true">
+      <button class="room-dialog-backdrop" type="button" aria-label="取消创建房间" data-home-modal-cancel></button>
+      <section class="room-dialog glass-card home-entry-dialog" role="dialog" aria-modal="true" aria-labelledby="homeCreateTitle">
+        <p class="card-label">创建房间</p>
+        <h2 id="homeCreateTitle">进入 <span data-home-create-room-name></span></h2>
+        <form data-home-create-dialog-form>
+          <div class="home-dialog-fields">
+            <label>
+              <span>你的昵称 <em>可不填</em></span>
+              <input type="text" name="nickname" maxlength="24" autocomplete="nickname" placeholder="留空使用当前或随机昵称" data-home-create-nickname />
+            </label>
+            <label>
+              <span>房间密码 <em>可不填</em></span>
+              <input type="password" name="password" maxlength="80" autocomplete="new-password" placeholder="留空则不设置密码" data-home-create-password />
+              <small>设置密码后，新成员需验证通过才能加载房间内容。</small>
+            </label>
+          </div>
+          <p class="room-dialog-error" data-home-create-dialog-error role="alert"></p>
+          <div class="room-dialog-actions">
+            <button class="button ghost" type="button" data-home-modal-cancel>取消</button>
+            <button class="button primary" type="submit" data-home-create-submit>创建并进入</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="room-dialog-modal home-entry-modal" data-home-join-modal hidden aria-hidden="true">
+      <button class="room-dialog-backdrop" type="button" aria-label="取消加入房间" data-home-modal-cancel></button>
+      <section class="room-dialog glass-card home-entry-dialog" role="dialog" aria-modal="true" aria-labelledby="homeJoinTitle">
+        <p class="card-label">加入房间</p>
+        <h2 id="homeJoinTitle">进入 <span data-home-join-room-name></span></h2>
+        <form data-home-join-dialog-form>
+          <div class="home-dialog-fields">
+            <label>
+              <span>你的昵称 <em>可不填</em></span>
+              <input type="text" name="nickname" maxlength="24" autocomplete="nickname" placeholder="留空使用当前或随机昵称" data-home-join-nickname />
+            </label>
+          </div>
+          <p class="room-dialog-error" data-home-join-dialog-error role="alert"></p>
+          <div class="room-dialog-actions">
+            <button class="button ghost" type="button" data-home-modal-cancel>取消</button>
+            <button class="button secondary" type="submit" data-home-join-submit>加入房间</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <script src="./assets/js/credentials.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/site.js?v=20260904-bilibili-fallback"></script>
+  </body>
+</html>

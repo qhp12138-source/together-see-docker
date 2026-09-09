@@ -1,0 +1,83 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  together-see-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: together-see-web
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      together-see-server:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
+
+  together-see-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: together-see-server
+    restart: unless-stopped
+    logging: *default-logging
+    # The store shutdown timeout is configurable up to 60 seconds.
+    stop_grace_period: 70s
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TRUST_PROXY_HOPS: "${TRUST_PROXY_HOPS:-2}"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}"
+      PARSE_TIMEOUT_MS: "${PARSE_TIMEOUT_MS:-12000}"
+      PARSE_PROBE_TIMEOUT_MS: "${PARSE_PROBE_TIMEOUT_MS:-5000}"
+      PARSE_PROBE_MAX_CANDIDATES: "${PARSE_PROBE_MAX_CANDIDATES:-3}"
+      PARSE_MAX_CONCURRENT_PER_CLIENT: "${PARSE_MAX_CONCURRENT_PER_CLIENT:-2}"
+      PARSE_MAX_CONCURRENT_TOTAL: "${PARSE_MAX_CONCURRENT_TOTAL:-16}"
+      PARSE_MAX_RESPONSE_BYTES: "${PARSE_MAX_RESPONSE_BYTES:-2097152}"
+      PARSE_CACHE_TTL_MS: "${PARSE_CACHE_TTL_MS:-600000}"
+      PARSE_RATE_LIMIT_PER_MINUTE: "${PARSE_RATE_LIMIT_PER_MINUTE:-30}"
+      BILIBILI_ENABLED: "${BILIBILI_ENABLED:-true}"
+      BILIBILI_TIMEOUT_MS: "${BILIBILI_TIMEOUT_MS:-12000}"
+      BILIBILI_RATE_LIMIT_PER_MINUTE: "${BILIBILI_RATE_LIMIT_PER_MINUTE:-20}"
+      BILIBILI_DANMAKU_MAX_ITEMS: "${BILIBILI_DANMAKU_MAX_ITEMS:-3000}"
+      BILIBILI_DANMAKU_MAX_RESPONSE_BYTES: "${BILIBILI_DANMAKU_MAX_RESPONSE_BYTES:-8388608}"
+      BILIBILI_CACHE_TTL_MS: "${BILIBILI_CACHE_TTL_MS:-600000}"
+      HLS_PROXY_ENABLED: "${HLS_PROXY_ENABLED:-true}"
+      HLS_PROXY_TIMEOUT_MS: "${HLS_PROXY_TIMEOUT_MS:-30000}"
+      HLS_PROXY_RATE_LIMIT_PER_MINUTE: "${HLS_PROXY_RATE_LIMIT_PER_MINUTE:-120}"
+      HLS_PROXY_MAX_CONCURRENT_PER_CLIENT: "${HLS_PROXY_MAX_CONCURRENT_PER_CLIENT:-8}"
+      HLS_PROXY_MAX_CONCURRENT_TOTAL: "${HLS_PROXY_MAX_CONCURRENT_TOTAL:-64}"
+      HLS_PROXY_ALLOWED_HOSTS: "${HLS_PROXY_ALLOWED_HOSTS:-*.bilivideo.com}"
+      MEDIA_PROXY_TOKEN_TTL_MS: "${MEDIA_PROXY_TOKEN_TTL_MS:-21600000}"
+      MEDIA_PROXY_TOKEN_MAX_ACTIVE: "${MEDIA_PROXY_TOKEN_MAX_ACTIVE:-50000}"
+      PROXY_USER_AGENT: "${PROXY_USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36}"
+      ROOM_STORE_ENABLED: "${ROOM_STORE_ENABLED:-true}"
+      ROOM_STORE_FILE: "${ROOM_STORE_FILE:-data/rooms.json}"
+      ROOM_STORE_WRITE_DELAY_MS: "${ROOM_STORE_WRITE_DELAY_MS:-800}"
+      ROOM_STORE_SHUTDOWN_TIMEOUT_MS: "${ROOM_STORE_SHUTDOWN_TIMEOUT_MS:-20000}"
+      ROOM_STORE_MAX_BYTES: "${ROOM_STORE_MAX_BYTES:-67108864}"
+      ROOM_STORE_MAX_ROOM_BYTES: "${ROOM_STORE_MAX_ROOM_BYTES:-3145728}"
+      ROOM_STORE_MAX_ROOMS: "${ROOM_STORE_MAX_ROOMS:-500}"
+      ROOM_MAX_MEMBERS: "${ROOM_MAX_MEMBERS:-20}"
+      ROOM_MAX_RECONNECT_ENTRIES: "${ROOM_MAX_RECONNECT_ENTRIES:-100}"
+      ROOM_MAX_ACTIVE: "${ROOM_MAX_ACTIVE:-20}"
+      ROOM_CREATE_RATE_LIMIT_PER_MINUTE: "${ROOM_CREATE_RATE_LIMIT_PER_MINUTE:-10}"
+      ROOM_MAX_PLAYLIST_ITEMS: "${ROOM_MAX_PLAYLIST_ITEMS:-200}"
+      ROOM_MAX_KICKED_ENTRIES: "${ROOM_MAX_KICKED_ENTRIES:-400}"
+      ROOM_EMPTY_TTL_MS: "${ROOM_EMPTY_TTL_MS:-7200000}"
+      ROOM_RECONNECT_GRACE_MS: "${ROOM_RECONNECT_GRACE_MS:-120000}"
+      ROOM_HOST_RECONNECT_GRACE_MS: "${ROOM_HOST_RECONNECT_GRACE_MS:-60000}"
+    volumes:
+      - ./server/data:/app/data
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s

@@ -1,0 +1,57 @@
+{
+  "name": "together-see-server",
+  "version": "0.2.0-beta.31",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify:credentials": "node scripts/verify-credentials.mjs",
+    "verify:release-contract": "node scripts/verify-release-contract.mjs",
+    "verify:client-address": "npm run build && node scripts/verify-client-address.mjs",
+    "verify:http-smoke": "npm run build && node scripts/verify-http-smoke.mjs",
+    "verify:origin-policy": "npm run build && node scripts/verify-origin-policy.mjs",
+    "verify:parser-policy": "npm run build && node scripts/verify-parser-policy.mjs",
+    "verify:parser-sniffing": "npm run build && node scripts/verify-parser-sniffing.mjs",
+    "verify:bilibili": "npm run build && node scripts/verify-bilibili.mjs",
+    "verify:proxy-policy": "npm run build && node scripts/verify-proxy-policy.mjs",
+    "verify:room-flow": "npm run build && node scripts/verify-room-flow.mjs",
+    "verify:room-restart": "npm run build && node scripts/verify-room-restart.mjs",
+    "verify:socket-smoke": "npm run build && node scripts/verify-socket-smoke.mjs",
+    "verify:store-health": "npm run build && node scripts/verify-store-health.mjs",
+    "verify:store-latency": "npm run build && node scripts/verify-store-latency.mjs",
+    "verify:store-shutdown": "npm run build && node scripts/verify-store-shutdown.mjs",
+    "verify:observability": "npm run build && node scripts/verify-observability.mjs",
+    "generate:sbom": "node scripts/generate-sbom.mjs",
+    "verify:sbom": "node scripts/verify-sbom.mjs",
+    "verify:frontend": "node --check ../assets/js/credentials.js && node --check ../assets/js/site.js && node --check ../assets/js/recovery.js && node --check ../assets/js/hls.js && node --check ../assets/js/player.js && node --check ../assets/js/room.js && node scripts/verify-player-recovery.mjs",
+    "verify:browser-e2e": "npm run build && playwright test --config playwright.config.mjs",
+    "verify:browser-e2e:headed": "npm run build && playwright test --config playwright.config.mjs --headed",
+    "verify:browser-soak": "npm run build && node scripts/run-browser-soak.mjs",
+    "verify:browser-soak:smoke": "npm run build && node scripts/run-browser-soak.mjs --smoke",
+    "verify:browser-soak:weak-smoke": "npm run build && node scripts/run-browser-soak.mjs --weak-smoke",
+    "verify:1.0": "npm run verify:release && npm run verify:browser-e2e",
+    "verify:1.0:full": "npm run verify:1.0 && npm run verify:browser-soak",
+    "verify:release": "npm run typecheck && npm run verify:frontend && npm run verify:credentials && npm run verify:release-contract && npm run verify:sbom && npm run build && node scripts/verify-client-address.mjs && node scripts/verify-observability.mjs && node scripts/verify-room-flow.mjs && node scripts/verify-room-restart.mjs && node scripts/verify-store-health.mjs && node scripts/verify-store-latency.mjs && node scripts/verify-store-shutdown.mjs && node scripts/verify-http-smoke.mjs && node scripts/verify-origin-policy.mjs && node scripts/verify-parser-policy.mjs && node scripts/verify-parser-sniffing.mjs && node scripts/verify-bilibili.mjs && node scripts/verify-proxy-policy.mjs && node scripts/verify-socket-smoke.mjs"
+  },
+  "dependencies": {
+    "cheerio": "1.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "overrides": {
+    "qs": "6.16.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.12",
+    "tsx": "^4.23.1",
+    "typescript": "^5.4.5"
+  }
+}

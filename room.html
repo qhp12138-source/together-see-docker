@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>一起See房间 · Together See</title>
+    <meta
+      name="description"
+      content="一起See · Together See 同步观影房间，包含视频播放、进度同步、聊天、成员和播放列表。"
+    />
+    <meta name="theme-color" content="#080b12" />
+    <link rel="icon" type="image/svg+xml" href="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" />
+    <link rel="stylesheet" href="./assets/css/main.css?v=20260904-bilibili-fallback" />
+  </head>
+  <body data-page="room" data-room-access="pending">
+    <div class="page-shell room-page">
+      <div class="background-grid"></div>
+      <div class="background-orb orb-cyan"></div>
+      <div class="background-orb orb-orange"></div>
+
+      <header class="site-header compact-header">
+        <a class="brand" href="./index.html" aria-label="一起See 首页">
+          <span class="brand-mark" aria-hidden="true"><img src="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" alt="" /></span>
+          <span class="brand-copy">
+            <strong>一起See</strong>
+            <small>Together See</small>
+          </span>
+        </a>
+
+        <div class="site-actions">
+          <button class="button ghost" type="button" data-share-room>分享</button>
+          <a class="button primary" href="./index.html">首页</a>
+        </div>
+      </header>
+
+      <main class="room-main" inert>
+        <section class="room-stage-shell">
+          <div class="room-toolbar glass-card">
+            <div class="toolbar-primary">
+              <div class="toolbar-group">
+                <p class="toolbar-label">当前房间</p>
+                <h1 data-room-name-display>未命名房间</h1>
+              </div>
+            </div>
+
+            <div class="toolbar-group right room-status-strip">
+              <div class="toolbar-kpi compact">
+                <span>在线人数</span>
+                <strong data-toolbar-member-count>0</strong>
+              </div>
+              <div class="toolbar-kpi compact text-kpi">
+                <span>身份</span>
+                <strong data-room-role-label>成员</strong>
+              </div>
+              <div class="toolbar-kpi compact text-kpi">
+                <span>状态</span>
+                <strong data-room-connection-status>连接中</strong>
+              </div>
+              <span class="status-pill live" data-room-control-state>同步中</span>
+              <label class="sync-threshold-control" title="与控制端相差超过此值后才开始轻微倍速校准；达到更大误差时会直接跳转同步。">
+                <span>同步阈值</span>
+                <input type="number" min="0.2" max="5" step="0.1" value="2.5" inputmode="decimal" aria-label="同步阈值，单位秒" data-sync-threshold-input />
+                <em>s</em>
+              </label>
+            </div>
+          </div>
+
+          <div class="stage-layout">
+            <section class="video-stage glass-panel">
+              <div class="stage-cinema player-shell is-controls-visible" data-player-shell>
+                <video
+                  id="roomVideo"
+                  class="room-video"
+                  playsinline
+                  preload="auto"
+                  data-room-video
+                ></video>
+
+                <div class="danmaku-layer" data-player-danmaku-layer aria-hidden="true"></div>
+
+                <button class="player-big-toggle" type="button" aria-label="播放" title="播放" data-player-center-play><svg class="control-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.75v10.5L17.25 12z" /></svg></button>
+                <button class="player-lock-toggle" type="button" aria-label="锁定控制器" title="锁定控制器" data-player-control-lock>
+                  <svg class="control-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-9.8-1.4l1.9.6A3 3 0 0 1 15 7v2H7.5A2.5 2.5 0 0 0 5 11.5v6A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-6A2.5 2.5 0 0 0 16.5 9H17zm-9.5 2h9a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5v-6a.5.5 0 0 1 .5-.5z" /></svg>
+                </button>
+
+                <div class="player-top-overlay">
+                  <div class="player-brand-line">一起See</div>
+                  <time class="player-system-clock" datetime="" data-player-system-clock>--:--</time>
+                </div>
+
+                <div class="player-empty" data-player-empty>
+                  <div class="cinema-gradient"></div>
+                  <div class="cinema-beam"></div>
+                  <div class="cinema-frame">
+                    <div class="frame-header">
+                      <span class="frame-dot"></span>
+                      <span class="frame-dot"></span>
+                      <span class="frame-dot"></span>
+                      <p>Waiting for source</p>
+                    </div>
+                  </div>
+                  <div class="cinema-copy">
+                    <p class="eyebrow">一起See · Together See</p>
+                    <h2 data-room-name-display>未命名房间</h2>
+                    <p data-player-empty-text>
+                      这里不会直接提供视频内容。房主把带视频的链接粘贴到右侧播放列表后，
+                      系统解析视频源，再在这个区域进行同步播放。
+                    </p>
+                    <div class="cinema-badges">
+                      <span>用户自带链接</span>
+                      <span>解析后同步播放</span>
+                      <span>支持房间聊天</span>
+                    </div>
+                  </div>
+
+                  <div class="danmaku-sample danmaku-a">把视频链接贴到右侧列表里</div>
+                  <div class="danmaku-sample danmaku-b">解析后这里会开始同步播放</div>
+                  <div class="danmaku-sample danmaku-c">房间成员可以边看边聊天</div>
+                </div>
+
+                <div class="stage-controls player-controls-overlay" data-player-controls>
+                  <div class="progress-stack">
+                    <div class="progress-meta">
+                      <span data-player-source-status>等待视频源</span>
+                      <span data-player-stage-time>00:00 / 00:00</span>
+                    </div>
+                    <button class="progress-track large" type="button" aria-label="跳转播放进度" data-player-progress-track>
+                      <i class="buffer" style="width: 0%" data-player-buffer></i>
+                      <i class="current" style="width: 0%" data-player-current></i>
+                      <span class="progress-hover-time" data-progress-hover-time>00:00</span>
+                    </button>
+                  </div>
+
+                  <div class="controls-row">
+                    <div class="control-buttons">
+                      <button class="circle-button icon-button" type="button" aria-label="上一集" title="上一集" data-player-prev><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM18 6v12L9.5 12z" /></svg></button>
+                      <button class="circle-button primary icon-button" type="button" aria-label="播放" title="播放 / 暂停" data-player-play><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg></button>
+                      <button class="circle-button icon-button" type="button" aria-label="下一集" title="下一集" data-player-next><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM6 6l8.5 6L6 18z" /></svg></button>
+                      <div class="volume-control" data-player-volume-control>
+                        <button class="circle-button icon-button volume-button" type="button" aria-label="音量" title="音量" data-player-volume><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4zm11.5-.3 1.4-1.4A6.8 6.8 0 0 1 19 12a6.8 6.8 0 0 1-2.1 4.7l-1.4-1.4A4.7 4.7 0 0 0 17 12a4.7 4.7 0 0 0-1.5-3.3z" /></svg></button>
+                        <div class="volume-popover" data-player-volume-popover>
+                          <span class="volume-value" data-player-volume-value>100%</span>
+                          <div class="volume-slider-shell">
+                            <div class="volume-slider-visual" aria-hidden="true">
+                              <span class="volume-slider-track"></span>
+                              <span class="volume-slider-fill"></span>
+                              <span class="volume-slider-thumb"></span>
+                            </div>
+                            <input class="volume-range" type="range" min="0" max="100" step="1" value="100" aria-label="调节音量" data-player-volume-range />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <form class="fullscreen-danmaku-compose" data-danmaku-form>
+                      <input
+                        type="text"
+                        name="danmaku"
+                        maxlength="100"
+                        autocomplete="off"
+                        enterkeyhint="send"
+                        placeholder="发送弹幕"
+                        aria-label="弹幕内容"
+                        data-danmaku-input
+                      />
+                      <button class="fullscreen-danmaku-send" type="submit" aria-label="发送弹幕" title="发送弹幕">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 4.2a1 1 0 0 1 1.08-.18l16 7a1 1 0 0 1 0 1.84l-16 7A1 1 0 0 1 3.1 18.8L5.2 13 13 12 5.2 11 3.1 5.2a1 1 0 0 1 .3-1z" /></svg>
+                      </button>
+                    </form>
+                    <div class="control-buttons small">
+                      <span class="playback-status" data-player-playback-status>等待房主开始</span>
+                      <button class="pill-button" type="button" title="切换倍速：1.00x" aria-label="切换倍速，当前 1.00x" data-player-rate>1.00x</button>
+                      <button class="pill-button icon-pill" type="button" aria-label="关闭弹幕" title="弹幕开" data-player-danmaku data-danmaku-on="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H11l-4.2 4.2A1 1 0 0 1 5 18.5V15.3A2.5 2.5 0 0 1 3 12.9V5.5zm4 2.2v1.6h8V7.7H8zm0 3.3v1.6h5.7V11H8z" /></svg></button>
+                      <button class="pill-button icon-pill sync-pill is-active" type="button" aria-label="关闭自动同步" title="自动同步开" data-player-auto-sync data-sync-on="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a7 7 0 0 1 6.33 4H16l3.6 3.6L23.2 9h-2.78A9 9 0 0 0 4.7 4.7l1.42 1.42A6.98 6.98 0 0 1 12 5zm-7.6 6.4L.8 15h2.78A9 9 0 0 0 19.3 19.3l-1.42-1.42A7 7 0 0 1 5.67 15H8l-3.6-3.6z" /></svg></button>
+                      <button class="pill-button icon-pill sync-pill" type="button" aria-label="手动同步" title="手动同步" data-player-manual-sync><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9H1l3 3.2L7 12H5a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 12 3zm1 4h-2v5.4l4.4 2.6 1-1.73-3.4-2.02V7z" /></svg></button>
+                      <button class="pill-button icon-pill" type="button" aria-label="网页全屏" title="网页全屏" data-page-fullscreen><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13zm2 .5v12h12V6H6zm2 2h4v2H8V8zm8 0v4h-2V8h2zm-8 8v-4h2v4H8zm8 0h-4v-2h4v2z" /></svg></button>
+                      <button class="pill-button icon-pill" type="button" aria-label="全屏" title="全屏" data-player-fullscreen><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H7v4H5V5zm8 0h6v6h-2V7h-4V5zM5 13h2v4h4v2H5v-6zm12 0h2v6h-6v-2h4v-4z" /></svg></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside class="room-sidebar">
+              <div class="sidebar-tabs glass-card">
+                <button class="sidebar-tab active" type="button" data-room-tab="chat">
+                  <span class="sidebar-tab-main">聊天</span>
+                  <span class="sidebar-tab-meta" data-chat-count>0 条消息</span>
+                </button>
+                <button class="sidebar-tab" type="button" data-room-tab="members">
+                  <span class="sidebar-tab-main">成员</span>
+                  <span class="sidebar-tab-meta" data-member-count>0 人在线</span>
+                </button>
+                <button class="sidebar-tab" type="button" data-room-tab="playlist">
+                  <span class="sidebar-tab-main">列表</span>
+                  <span class="sidebar-tab-meta" data-playlist-count>0 个条目</span>
+                </button>
+              </div>
+
+              <section class="sidebar-panel active glass-card" data-room-panel="chat">
+                <div class="panel-head">
+                  <div>
+                    <p class="card-label">聊天</p>
+                    <strong class="panel-title">实时消息</strong>
+                  </div>
+                  <span>房间活跃中</span>
+                </div>
+                <div class="chat-feed"></div>
+                <form class="message-form" data-message-form>
+                  <input type="text" name="message" placeholder="输入聊天内容..." />
+                  <button class="button secondary" type="submit">发送</button>
+                </form>
+              </section>
+
+              <section class="sidebar-panel glass-card" data-room-panel="members">
+                <div class="panel-head">
+                  <div>
+                    <p class="card-label">成员</p>
+                    <strong class="panel-title">在线列表</strong>
+                  </div>
+                  <div class="member-panel-actions">
+                    <span data-member-count>0 人在线</span>
+                  </div>
+                </div>
+                <details class="room-security-panel" data-room-security-panel>
+                  <summary>
+                    <span class="room-security-summary-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8.8 7 10 4.1-1.2 7-5.4 7-10V6l-7-3Z" /><path d="M9.5 12 11 13.5l3.5-3.5" /></svg>
+                    </span>
+                    <span class="room-security-summary-copy">
+                      <strong>房间设置</strong>
+                      <small data-room-security-summary>房主控制 · 开放加入</small>
+                    </span>
+                    <span class="room-security-chevron" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="m7 9.5 5 5 5-5" /></svg>
+                    </span>
+                  </summary>
+                  <div class="room-security-content">
+                    <div class="security-setting-row room-admin-status-row">
+                    <div class="security-setting-copy">
+                      <span>管理身份</span>
+                      <strong data-room-admin-status>正在验证</strong>
+                      <small data-room-admin-status-description>正在向房间服务确认当前设备的管理权限。</small>
+                    </div>
+                    </div>
+
+                    <div class="security-setting-row">
+                    <div class="security-setting-copy">
+                      <span>播放权限</span>
+                      <strong data-room-control-policy-label>仅房主控制</strong>
+                      <small data-room-control-policy-description>只有房主可操作播放、进度和视频队列。</small>
+                    </div>
+                    <div class="security-segmented" role="group" aria-label="播放控制权限">
+                      <button type="button" data-room-control-policy-option="host_only">房主</button>
+                      <button type="button" data-room-control-policy-option="everyone">全员</button>
+                    </div>
+                    </div>
+
+                    <div class="security-setting-row">
+                    <div class="security-setting-copy">
+                      <span>加入权限</span>
+                      <strong data-room-access-label>开放加入</strong>
+                      <small data-room-access-description>拥有房间链接和正确密码的新成员可以加入。</small>
+                    </div>
+                    <button class="security-lock-button" type="button" data-room-lock-toggle>锁定加入</button>
+                    </div>
+
+                    <form class="security-form" data-room-password-form>
+                    <label for="roomPasswordSetting">
+                      <span>房间密码</span>
+                      <em data-room-password-status>未设置</em>
+                    </label>
+                    <div class="security-input-row">
+                      <input id="roomPasswordSetting" type="password" minlength="4" maxlength="80" autocomplete="new-password" placeholder="输入至少 4 个字符" data-room-password-input />
+                      <button class="inline-edit-confirm" type="submit" aria-label="保存房间密码" title="保存">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7" /></svg>
+                      </button>
+                      <button class="inline-edit-cancel" type="button" aria-label="清除房间密码" title="清除密码" data-room-password-clear>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+                      </button>
+                    </div>
+                      <small data-room-password-help>密码与锁房相互独立；在线成员短暂断线可在宽限期内恢复。</small>
+                    </form>
+
+                    <form class="security-form" data-room-admin-recovery-form>
+                    <label for="roomAdminRecovery">
+                      <span>恢复管理身份</span>
+                      <em>创建者专用</em>
+                    </label>
+                    <div class="security-input-row">
+                      <input id="roomAdminRecovery" type="password" maxlength="120" autocomplete="off" placeholder="输入管理恢复码" data-room-admin-recovery-input />
+                      <button class="inline-edit-confirm" type="submit" aria-label="恢复管理身份" title="确认恢复">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7" /></svg>
+                      </button>
+                      <button class="inline-edit-cancel" type="reset" aria-label="清空恢复码" title="清空">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+                      </button>
+                    </div>
+                    <small>恢复成功后旧恢复码立即失效，并生成新的恢复码。</small>
+                    </form>
+
+                    <div class="admin-recovery-box" data-admin-recovery-box hidden>
+                    <div class="security-setting-copy">
+                      <span>管理恢复码</span>
+                      <strong data-admin-recovery-label>请单独安全备份</strong>
+                    </div>
+                    <div class="security-input-row">
+                      <input type="text" readonly data-admin-recovery-code aria-label="房间管理恢复码" />
+                      <button class="security-copy-button" type="button" data-admin-recovery-copy>复制</button>
+                    </div>
+                    <small>恢复后此码会轮换；服务器只保存哈希，无法找回明文。</small>
+                    </div>
+                  </div>
+                </details>
+                <div class="member-list"></div>
+                <div class="audit-panel">
+                  <div class="audit-panel-head">
+                    <strong>管理记录</strong>
+                    <span>最近操作</span>
+                  </div>
+                  <div class="audit-log" data-audit-log>
+                    <p class="audit-empty">暂无管理操作</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="sidebar-panel glass-card" data-room-panel="playlist">
+                <div class="panel-head">
+                  <div>
+                    <p class="card-label">列表</p>
+                    <strong class="panel-title">视频队列</strong>
+                  </div>
+                  <label class="toggle-row" title="开启后，当前控制端会自动切到下一项，并同步给房间内所有成员。">
+                    <span>自动连播</span>
+                    <input type="checkbox" data-autoplay-next />
+                    <i aria-hidden="true"></i>
+                  </label>
+                </div>
+                <form class="playlist-form" data-playlist-form>
+                  <input
+                    type="url"
+                    name="videoLink"
+                    placeholder="粘贴视频链接"
+                  />
+                  <button class="button secondary" type="submit">添加链接</button>
+                </form>
+                <div class="local-video-row">
+                  <button class="button ghost local-video-button" type="button" data-local-video-button>选择本地视频</button>
+                  <input class="local-video-input" type="file" accept="video/*,.mkv,.m3u8,.mp4,.webm,.mov,.m4v,.ogg,.ogv" data-local-video-input hidden />
+                </div>
+                <div class="playlist-scroll" data-playlist-scroll>
+                  <div class="playlist-empty" data-playlist-empty>还没有视频，先粘贴一个链接试试。</div>
+                  <ol class="playlist-list">
+                  </ol>
+                </div>
+                <p class="playlist-helper" data-playlist-helper>
+                  粘贴链接后由后端解析真实视频源；本地视频不会上传，房间成员需要在各自设备选择同一个文件后同步播放。
+                </p>
+              </section>
+            </aside>
+          </div>
+
+        </section>
+      </main>
+
+      <footer class="site-disclaimer" aria-label="免责声明">
+        <strong>免责声明</strong>
+        <p>本站仅供学习交流与技术研究，不提供、不上传或存储任何视频文件。房间中的链接、弹幕及其他内容均由用户自行提交，请仅使用已获合法授权或依法可使用的内容，并遵守著作权、网络信息内容管理及第三方平台规则。本站不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。</p>
+      </footer>
+    </div>
+
+    <div class="toast-stack" data-toast-stack></div>
+    <script src="./assets/js/credentials.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/site.js?v=20260904-bilibili-fallback"></script>
+      <div class="share-modal" data-share-modal hidden>
+        <div class="share-backdrop" data-share-close></div>
+        <section class="share-dialog glass-card" role="dialog" aria-modal="true" aria-labelledby="shareDialogTitle">
+          <button class="share-close" type="button" aria-label="关闭分享弹窗" data-share-close>×</button>
+          <p class="card-label">分享房间</p>
+          <h2 id="shareDialogTitle">复制链接邀请朋友加入</h2>
+          <p class="share-hint">分享链接只包含当前房间名，进入顺序由后端判断房主身份。</p>
+          <input class="share-link-input" type="text" readonly data-share-link />
+          <div class="share-dialog-actions">
+            <button class="button primary" type="button" data-share-copy>一键复制</button>
+            <button class="button secondary" type="button" data-share-native hidden>系统分享</button>
+          </div>
+          <p class="share-result" data-share-result>复制失败时，可长按输入框手动复制。</p>
+        </section>
+      </div>
+
+      <div class="room-dialog-modal" data-room-confirm-modal hidden>
+        <div class="room-dialog-backdrop" data-room-confirm-cancel></div>
+        <section class="room-dialog glass-card" role="alertdialog" aria-modal="true" aria-labelledby="roomConfirmTitle" aria-describedby="roomConfirmMessage">
+          <p class="card-label">请确认</p>
+          <h2 id="roomConfirmTitle" data-room-confirm-title>确认操作</h2>
+          <p id="roomConfirmMessage" data-room-confirm-message></p>
+          <div class="room-dialog-actions">
+            <button class="button ghost" type="button" data-room-confirm-cancel>取消</button>
+            <button class="button primary" type="button" data-room-confirm-accept>确认</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="room-dialog-modal room-access-modal" data-room-password-modal>
+        <div class="room-dialog-backdrop"></div>
+        <form class="room-dialog room-access-dialog glass-card" data-room-join-password-form role="dialog" aria-modal="true" aria-labelledby="roomPasswordDialogTitle">
+          <span class="room-access-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.9 8.8 7 10 4.1-1.2 7-5.4 7-10V6l-7-3Z" /><path d="M9 11V9a3 3 0 0 1 6 0v2M8.5 11h7v5h-7z" /></svg>
+          </span>
+          <p class="card-label" data-room-access-eyebrow>正在连接</p>
+          <h2 id="roomPasswordDialogTitle" data-room-access-title>正在进入房间</h2>
+          <p data-room-password-message>正在验证房间访问状态，请稍候。</p>
+          <div class="room-access-password-fields" data-room-password-fields hidden>
+            <input type="password" minlength="4" maxlength="80" autocomplete="current-password" placeholder="房间密码" data-room-join-password-input />
+            <p class="room-dialog-error" data-room-password-error></p>
+          </div>
+          <div class="room-access-password-fields" data-room-creator-recovery-fields hidden>
+            <input type="text" maxlength="120" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="管理恢复码" data-room-creator-recovery-input />
+            <p class="room-dialog-error" data-room-creator-recovery-error></p>
+          </div>
+          <div class="room-dialog-actions">
+            <a class="button ghost" href="./index.html" data-room-access-home>返回首页</a>
+            <button class="button primary" type="submit" data-room-access-submit hidden>验证并加入</button>
+          </div>
+        </form>
+      </div>
+
+    <script src="./assets/js/recovery.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/hls.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/player.js?v=20260904-bilibili-fallback"></script>
+    <script src="/socket.io/socket.io.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/room.js?v=20260904-bilibili-fallback"></script>
+  </body>
+</html>
