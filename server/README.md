@@ -1,8 +1,8 @@
 # Together See Server
 
-Node.js / TypeScript / Express / Socket.IO 后端，运行版本 1.3.1。公开快照候选的测试状态见 [验收清单](../1.0_ACCEPTANCE.md)，不沿用历史部署或测试结论。
+Node.js / TypeScript / Express / Socket.IO 后端，运行版本 1.3.1。2026-10-08 最终干净归档的 `verify:1.0` 退出码 0，后端全套及公开边界/导出通过；Chromium 111 项通过、1 项可选外网实播跳过，约 11.3 分钟。范围见 [验收清单](../1.0_ACCEPTANCE.md)，不表示已推送 GitHub 或部署。
 
-本候选保持 1.3 系列正常功能，依赖修复目标为 `proxy-addr` 2.0.8，处理 `GHSA-jqcg-44mw-7w3h`；锁文件、109 项 SBOM、安装树与修复后的审计结果须在最终候选中核对。公告与许可边界见 [第三方声明](../THIRD_PARTY_NOTICES.md)，不表示本轮已部署或完成全量测试。
+本版本保持 1.3 系列正常功能，使用 `proxy-addr` 2.0.8 修复 `GHSA-jqcg-44mw-7w3h`；归档实际 `npm ci`、109 项 SBOM 校验与官方源生产依赖审计通过，审计 0 漏洞。公开边界包含真实 Socket/浏览器负面用例，不只是静态扫描。公告与许可边界见 [第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 ## 接口与房间语义
 
@@ -23,10 +23,11 @@ Node.js / TypeScript / Express / Socket.IO 后端，运行版本 1.3.1。公开�
 
 ## 本地开发与验证
 
-从仓库根进入后端目录，使用 Node.js 24 和锁文件：
+从仓库根进入后端目录并使用锁文件。本轮验证使用 Windows 已安装的 Node.js 25.9.0；Dockerfile 使用 Node.js 24.18.0，本轮未验证 Docker 构建或运行：
 
 ```bash
 cd server
+npm run verify:public-export
 npm ci
 npm run dev
 ```
@@ -34,12 +35,14 @@ npm run dev
 该命令只提供 API/Socket；完整同源站点使用根目录 Docker Compose。配置参考 [部署文档](../部署文档.md)、根及后端 `.env.example`，不要提交 `.env`、`data`、`dist` 或 `node_modules`。
 
 ```bash
-npm run verify:release
 npx playwright install chromium
-npm run verify:1.0:full
+npm run verify:1.0
+npm audit --omit=dev --registry=https://registry.npmjs.org
 ```
 
-发布门禁覆盖类型、前端、凭据、协议、解析/代理、存储和互动；完整门禁另含浏览器与长播。命令是复验入口，不表示本候选已执行。Windows 可用 `npm.cmd`/`npx.cmd`，不要并发运行改写 `dist` 的构建。
+无 Git 元数据的干净归档在任何测试前改用 `npm run verify:public-export -- --archive`；默认模式用于普通 Git 工作区。严格归档检查通过，共 128 文件，互动目录为 catalog 加 question 三个文件。
+
+`verify:1.0` 覆盖发布及浏览器门禁；另行执行 `npm run verify:1.0:full` 才包含长播，本轮未执行。Docker 构建/部署、物理设备和 30 分钟长播仍未验。Windows 可用 `npm.cmd`/`npx.cmd`，不要并发运行改写 `dist` 的构建。
 
 ## 媒体授权
 

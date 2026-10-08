@@ -2,9 +2,9 @@
 
 支持 Docker 自部署的多人同步观影项目。将你有权使用的视频链接加入房间，与朋友同步播放、聊天和发送弹幕。
 
-**运行版本：1.3.1；公开快照候选日期：2026-10-08。** 本候选测试结果待补充；版本号不代表已完成公开发布、真机验收或生产部署。公开仓库不包含私人开发历史或运维资料。
+**运行版本：1.3.1；发布验证完成日期：2026-10-08。** 最终干净 Git 归档的 `verify:1.0` 退出码为 0：后端全套通过，Chromium 111 项通过、1 项可选外网实播跳过，约 11.3 分钟。归档中实际执行 `npm ci` 及官方源生产依赖审计，结果为 0 漏洞。此记录不表示已推送 GitHub、完成 Docker 构建/部署、真机或 30 分钟长播验收。公开仓库不包含私人开发历史或运维资料。
 
-1.3.1 保持 1.3 系列正常功能范围，仅增加依赖安全修复：`proxy-addr` 从 2.0.7 升至 2.0.8，对应 Critical 公告 [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h)（2026-10-05 收录于 GitHub Advisory Database）。修复后的完整测试和依赖审计仍待最终候选确认，不表示已部署。
+1.3.1 保持 1.3 系列正常功能范围，仅增加依赖安全修复：`proxy-addr` 从 2.0.7 升至 2.0.8，对应 Critical 公告 [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h)（2026-10-05 收录于 GitHub Advisory Database）。修复后的自动化与生产依赖审计已通过，证据范围见 [验收清单](1.0_ACCEPTANCE.md)。
 
 ## 功能
 
@@ -43,17 +43,20 @@ curl -fsS http://localhost:8080/api/health
 
 ## 开发与验证
 
-前端为 HTML/CSS/JavaScript，后端为 Node.js、TypeScript、Express 和 Socket.IO；HLS 使用 hls.js。使用与 Dockerfile 一致的 Node.js 24。
+前端为 HTML/CSS/JavaScript，后端为 Node.js、TypeScript、Express 和 Socket.IO；HLS 使用 hls.js。本轮实际验证环境为 Windows 已安装的 Node.js 25.9.0；Dockerfile 使用 Node.js 24.18.0，但本轮未构建或验证 Docker 运行环境。
 
 ```bash
 cd server
+npm run verify:public-export
 npm ci
-npm run verify:release
 npx playwright install chromium
-npm run verify:1.0:full
+npm run verify:1.0
+npm audit --omit=dev --registry=https://registry.npmjs.org
 ```
 
-Windows 可使用 `npm.cmd`/`npx.cmd`。`npm run dev` 只启动 API/Socket，不提供完整静态站点。以上是复验步骤，不是本候选已通过的结果；历史命名的 `verify:1.0:full` 仍用于完整验收。
+Windows 可使用 `npm.cmd`/`npx.cmd`。无 Git 元数据的干净归档应在任何测试生成运行数据前，将导出检查命令改为 `npm run verify:public-export -- --archive`；普通 Git 工作区使用上面的默认模式。严格归档检查通过：128 个文件，互动目录仅清单加 question 三个文件，SBOM 109 项。
+
+`npm run dev` 只启动 API/Socket，不提供完整静态站点。`verify:1.0` 不含 30 分钟长播；需要另行执行的 `npm run verify:1.0:full` 包含长播，本轮未执行。
 
 ## 限制与文档
 
