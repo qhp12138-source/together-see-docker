@@ -200,6 +200,7 @@ test('desktop and mobile contexts survive weak media delivery and a continuous p
     ]);
     const baselineHostTelemetry = await readMediaTelemetry(hostPage);
     const baselineGuestTelemetry = await readMediaTelemetry(guestPage);
+    report.baselineTelemetry = { host: baselineHostTelemetry, guest: baselineGuestTelemetry };
     const soakStartedAt = Date.now();
     let nextProgressLogMs = 5 * 60_000;
     while (Date.now() - soakStartedAt < soakDurationMs) {
@@ -224,6 +225,8 @@ test('desktop and mobile contexts survive weak media delivery and a continuous p
       expect(guestState.currentSrc).toBe(guestSrc);
       expect(hostState.ended).toBe(false);
       expect(guestState.ended).toBe(false);
+      expect(hostState.paused, 'host must keep playing during the stable soak').toBe(false);
+      expect(guestState.paused, 'guest must keep playing during the stable soak').toBe(false);
       expect(hostState.playbackRate).toBeGreaterThanOrEqual(0.5);
       expect(hostState.playbackRate).toBeLessThanOrEqual(3);
       expect(guestState.playbackRate).toBeGreaterThanOrEqual(0.5);
@@ -231,6 +234,8 @@ test('desktop and mobile contexts survive weak media delivery and a continuous p
       expect(drift).toBeLessThanOrEqual(4);
       expect(hostTelemetry.counts.error).toBe(0);
       expect(guestTelemetry.counts.error).toBe(0);
+      expect(hostTelemetry.counts.pause, 'host must not silently pause and recover between samples').toBe(baselineHostTelemetry.counts.pause);
+      expect(guestTelemetry.counts.pause, 'guest must not silently pause and recover between samples').toBe(baselineGuestTelemetry.counts.pause);
       expect(hostTelemetry.counts.loadstart).toBe(baselineHostTelemetry.counts.loadstart);
       expect(hostTelemetry.counts.emptied).toBe(baselineHostTelemetry.counts.emptied);
       expect(guestTelemetry.counts.loadstart).toBe(baselineGuestTelemetry.counts.loadstart);
@@ -265,6 +270,10 @@ test('desktop and mobile contexts survive weak media delivery and a continuous p
     expect(finalGuest.currentTime - soakInitialGuest.currentTime).toBeGreaterThan((soakDurationMs / 1000) * 0.80);
     expect(finalHostTelemetry.counts.error).toBe(0);
     expect(finalGuestTelemetry.counts.error).toBe(0);
+    expect(finalHost.paused).toBe(false);
+    expect(finalGuest.paused).toBe(false);
+    expect(finalHostTelemetry.counts.pause).toBe(baselineHostTelemetry.counts.pause);
+    expect(finalGuestTelemetry.counts.pause).toBe(baselineGuestTelemetry.counts.pause);
     expect(hostRequests.length).toBeGreaterThan(0);
     expect(guestRequests.length).toBeGreaterThan(0);
     expect(hostRequests.every((request) => request.status === 206)).toBe(true);

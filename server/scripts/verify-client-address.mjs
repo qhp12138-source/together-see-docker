@@ -1,4 +1,19 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const proxyaddr = require('proxy-addr');
+assert.equal(require('proxy-addr/package.json').version, '2.0.8');
+for (const subnet of ['::ffff:10.0.0.0/8', '::/1']) {
+  const trust = proxyaddr.compile(subnet);
+  assert.equal(trust('203.0.113.9'), false, 'an IPv6 trust subnet must not accidentally trust arbitrary IPv4 peers');
+  assert.equal(trust('::ffff:203.0.113.9'), false, 'mapped peers must not evade the trust boundary');
+}
+for (const subnet of ['10.0.0.0/8', '::ffff:10.0.0.0/104']) {
+  const trust = proxyaddr.compile(subnet);
+  assert.equal(trust('10.1.2.3'), true);
+  assert.equal(trust('203.0.113.9'), false);
+}
 
 const { getTrustedClientAddress } = await import('../dist/utils/client-address.js');
 

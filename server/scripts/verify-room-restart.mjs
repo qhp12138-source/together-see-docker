@@ -62,6 +62,12 @@ async function runCreateWorker() {
   });
   assert.equal(playbackDecision.accepted, true);
   assert.equal(playbackDecision.state.playback.buffering, true);
+  roomService.addPlaylistItem(roomCode, {
+    id: 'restart-browser-direct', title: 'Browser Direct',
+    pageUrl: 'https://93.184.216.34/browser-direct.m3u8',
+    sourceUrl: 'https://93.184.216.34/browser-direct.m3u8', sourceType: 'hls',
+    clientDirectOnly: true, requiresClientParse: true,
+  });
   const pendingRoomCode = `${roomCode}-PENDING`;
   const pendingCreation = roomService.createRoom(pendingRoomCode, 'Pending Creator Restart');
   assert.ok(pendingCreation?.credentials.adminToken && pendingCreation?.credentials.recoveryCode);
@@ -96,6 +102,9 @@ async function runRestoreWorker() {
   assert.equal(state.playback.buffering, false, 'a process restart must clear an ephemeral buffering lock');
   assert.equal(state.playback.playing, false, 'a room restored from a buffering boundary must not extrapolate a phantom timeline');
   assert.equal(state.playback.currentTime, 12.5, 'a room restored from buffering should preserve the last actual media position');
+  assert.equal(state.playlist.find(item => item.id === 'restart-browser-direct')?.clientDirectOnly, true);
+  assert.equal(state.playlist.find(item => item.id === 'restart-browser-direct')?.requiresClientParse, false);
+  assert.equal(state.playlist.find(item => item.id === 'restart-local-video')?.clientDirectOnly, false);
   assert.equal(state.members.find((member) => member.id === 'restart-guest')?.role, 'follower');
   assert.ok(state.members.every((member) => !Object.hasOwn(member, 'socketId')), 'restored public room state must not expose socket ids');
   assert.equal(await roomService.getJoinRejection(roomCode, 'restart-host', undefined, undefined, hostReconnectToken), null);

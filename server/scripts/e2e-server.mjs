@@ -13,6 +13,10 @@ Object.assign(process.env, {
   PORT: String(port),
   PUBLIC_ORIGIN: origin,
   ROOM_STORE_ENABLED: 'false',
+  // The isolated suite retains synthetic rooms until process exit.
+  ROOM_MAX_ACTIVE: '100',
+  ROOM_STORE_MAX_BYTES: String(64 * 1024 * 1024),
+  ROOM_STORE_MAX_ROOM_BYTES: String(512 * 1024),
   ROOM_CREATE_RATE_LIMIT_PER_MINUTE: '0',
   PARSE_RATE_LIMIT_PER_MINUTE: '0',
 });
@@ -21,6 +25,10 @@ const [{ createApp }, { attachSocketServer }] = await Promise.all([
   import('../dist/app.js'),
   import('../dist/sockets/index.js'),
 ]);
+const { env } = await import('../dist/config/env.js');
+if (env.roomStoreEnabled || env.roomMaxActive !== 100) {
+  throw new Error('Isolated E2E capacity must be 100 rooms with persistence disabled');
+}
 
 const app = createApp();
 const noStore = (_req, res, next) => {

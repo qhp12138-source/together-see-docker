@@ -17,6 +17,8 @@ services:
         condition: service_healthy
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    volumes:
+      - ./assets/interactions:/usr/share/nginx/html/assets/interactions:ro
 
   together-see-server:
     build:
@@ -30,6 +32,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      INTERACTION_ASSET_DIR: /app/interactions
       TRUST_PROXY_HOPS: "${TRUST_PROXY_HOPS:-2}"
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}"
       PARSE_TIMEOUT_MS: "${PARSE_TIMEOUT_MS:-12000}"
@@ -62,7 +65,7 @@ services:
       ROOM_STORE_MAX_BYTES: "${ROOM_STORE_MAX_BYTES:-67108864}"
       ROOM_STORE_MAX_ROOM_BYTES: "${ROOM_STORE_MAX_ROOM_BYTES:-3145728}"
       ROOM_STORE_MAX_ROOMS: "${ROOM_STORE_MAX_ROOMS:-500}"
-      ROOM_MAX_MEMBERS: "${ROOM_MAX_MEMBERS:-20}"
+      ROOM_MAX_MEMBERS: "${ROOM_MAX_MEMBERS:-100}"
       ROOM_MAX_RECONNECT_ENTRIES: "${ROOM_MAX_RECONNECT_ENTRIES:-100}"
       ROOM_MAX_ACTIVE: "${ROOM_MAX_ACTIVE:-20}"
       ROOM_CREATE_RATE_LIMIT_PER_MINUTE: "${ROOM_CREATE_RATE_LIMIT_PER_MINUTE:-10}"
@@ -73,6 +76,7 @@ services:
       ROOM_HOST_RECONNECT_GRACE_MS: "${ROOM_HOST_RECONNECT_GRACE_MS:-60000}"
     volumes:
       - ./server/data:/app/data
+      - ./assets/interactions:/app/interactions:ro
     expose:
       - "3000"
     healthcheck:

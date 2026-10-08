@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "heart",
+      "label": "爱心",
+      "type": "builtin",
+      "effect": "heart",
+      "durationMs": 2400
+    },
+    {
+      "id": "fireworks",
+      "label": "烟花",
+      "type": "builtin",
+      "effect": "fireworks",
+      "durationMs": 2800
+    },
+    {
+      "id": "sakura",
+      "label": "完结撒花",
+      "type": "builtin",
+      "effect": "sakura",
+      "durationMs": 2800
+    },
+    {
+      "id": "birthday",
+      "label": "生日快乐",
+      "type": "builtin",
+      "effect": "birthday",
+      "durationMs": 2800
+    },
+    {
+      "id": "question",
+      "label": "问号",
+      "type": "sprite",
+      "src": "/assets/interactions/question/spritesheet.png",
+      "poster": "/assets/interactions/question/poster.png",
+      "audio": "/assets/interactions/question/audio.wav",
+      "durationMs": 2100,
+      "width": 168,
+      "height": 320,
+      "columns": 7,
+      "frames": 42
+    }
+  ]
+}

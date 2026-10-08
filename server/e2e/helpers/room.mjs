@@ -132,6 +132,7 @@ export async function installMediaTelemetry(page) {
       waiting: 0,
       stalled: 0,
       playing: 0,
+      pause: 0,
       error: 0,
       seeking: 0,
       seeked: 0,

@@ -92,6 +92,7 @@
       invalidate: function () { return begin("pending"); },
       current: function () { return currentToken ? Object.assign({}, currentToken) : null; },
       isCurrent: isCurrent,
+      isTerminal: function (token) { return isCurrent(token) && terminalDispatched; },
       isReady: function (token) { return isCurrent(token) && ready; },
       markReady: function (token) {
         if (!isCurrent(token) || terminalDispatched || ready) return false;
@@ -270,6 +271,89 @@
     };
   }
 
+  function createPlaybackStartController(options) {
+    const schedule = options?.setTimeout || setTimeout;
+    const cancel = options?.clearTimeout || clearTimeout;
+    const retryDelays = [400, 1000, 2000];
+    let current = null;
+
+    function reset() {
+      if (current?.timer != null) cancel(current.timer);
+      current?.resolve?.(false);
+      current = null;
+    }
+
+    function suspend() {
+      if (!current) return;
+      if (current.timer != null) cancel(current.timer);
+      current.timer = null;
+      current.run = (current.run || 0) + 1;
+      current.resolve?.(false);
+      current.promise = null;
+      current.resolve = null;
+    }
+
+    function request(input) {
+      if (!input?.identity || !input.isCurrent()) return Promise.resolve(false);
+      if (current?.identity !== input.identity) reset();
+      if (!current) current = { identity: input.identity, attempts: 0, blocked: false, timer: null, promise: null };
+      const job = current;
+      job.input = input;
+      if (job.blocked) return Promise.resolve(false);
+      if (job.promise) return job.promise;
+      if (job.attempts >= retryDelays.length + 1) {
+        job.blocked = true;
+        input.onBlocked?.("interrupted");
+        return Promise.resolve(false);
+      }
+      const run = job.run = (job.run || 0) + 1;
+      job.promise = new Promise(function (resolve) { job.resolve = resolve; });
+      const result = job.promise;
+
+      function finish(ok) {
+        job.resolve(ok);
+        job.promise = null;
+        job.resolve = null;
+      }
+
+      function attempt() {
+        job.timer = null;
+        if (current !== job || job.run !== run) return;
+        if (!job.input.isCurrent()) {
+          suspend();
+          return;
+        }
+        job.attempts += 1;
+        let promise;
+        try { promise = job.input.play(); } catch (error) { promise = Promise.reject(error); }
+        Promise.resolve(promise).then(function () {
+          if (current !== job || job.run !== run) return;
+          if (!job.input.isCurrent()) { suspend(); return; }
+          job.attempts = 0;
+          finish(true);
+          job.input.onSuccess?.();
+        }, function (error) {
+          if (current !== job || job.run !== run) return;
+          if (!job.input.isCurrent()) { suspend(); return; }
+          if (error?.name === "AbortError" && job.attempts <= retryDelays.length) {
+            job.timer = schedule(attempt, retryDelays[job.attempts - 1]);
+            return;
+          }
+          job.blocked = true;
+          const reason = error?.name === "NotAllowedError" ? "gesture"
+            : error?.name === "AbortError" ? "interrupted" : "failed";
+          job.input.onBlocked?.(reason);
+          finish(false);
+        });
+      }
+
+      attempt();
+      return result;
+    }
+
+    return { request: request, reset: reset, suspend: suspend };
+  }
+
   function createAckSingleFlight(options) {
     const timeoutMs = Math.max(1000, Number(options?.timeoutMs) || 5000);
     const schedule = typeof options?.setTimeout === "function" ? options.setTimeout : setTimeout;
@@ -373,14 +457,112 @@
     return playback.updatedBy !== memberId || options?.restoreAuthoritative === true;
   }
 
+  function getContiguousBufferAhead(buffered, currentTime) {
+    if (!buffered || !Number.isFinite(currentTime)) return 0;
+    const tolerance = 0.05;
+    try {
+      for (let index = 0; index < buffered.length; index += 1) {
+        if (currentTime < buffered.start(index) - tolerance) return 0;
+        let end = buffered.end(index);
+        if (currentTime > end) continue;
+        while (index + 1 < buffered.length && buffered.start(index + 1) <= end + tolerance) {
+          end = Math.max(end, buffered.end(++index));
+        }
+        return Math.max(0, end - currentTime);
+      }
+    } catch (error) {
+      // MediaSource can detach between reading the range count and its bounds.
+    }
+    return 0;
+  }
+
+  function resumeHlsBuffering(instance) {
+    if (!instance || instance.loadingEnabled === false || instance.bufferingEnabled === true
+      || typeof instance.resumeBuffering !== "function") return false;
+    // startLoad() stops the stream controller and aborts its in-flight fragment.
+    // Initial loading and fatal recovery belong to their existing explicit paths.
+    instance.resumeBuffering();
+    return true;
+  }
+
+  function createCatchUpRateGuard() {
+    let blocked = false;
+    return {
+      reset: function () { blocked = false; },
+      select: function (value) {
+        const base = value.baseRate;
+        const requested = value.requestedRate;
+        if (!value.eligible) {
+          blocked = true;
+          return base;
+        }
+        if (requested <= base) return requested;
+        // Measure runway at the requested rate; 2x consumes two media seconds per second.
+        const runway = value.bufferedAhead / requested;
+        if (!Number.isFinite(runway) || runway < 2) blocked = true;
+        else if (runway >= 4) blocked = false;
+        return blocked ? base : requested;
+      },
+    };
+  }
+
+  function createForegroundFrameRecovery() {
+    let identity = "";
+    let until = 0;
+    let stage = 0;
+    let anchor = null;
+    let lastSampleAt = 0;
+    return {
+      reset: function (nextIdentity) {
+        if (identity === nextIdentity) return;
+        identity = nextIdentity;
+        until = 0;
+        stage = 0;
+        anchor = null;
+      },
+      arm: function (now) {
+        until = now + 30000;
+        anchor = null;
+        lastSampleAt = now;
+      },
+      suspend: function () { until = 0; anchor = null; },
+      sample: function (value) {
+        const now = value.now;
+        const delayed = now - lastSampleAt > 2500;
+        lastSampleAt = now;
+        if (!identity || !until || now > until || stage >= 2) return null;
+        if (!value.eligible || !Number.isFinite(value.frames) || !Number.isFinite(value.time)) {
+          anchor = null;
+          return null;
+        }
+        // A throttled timer or a seek is not evidence that video decoding froze.
+        if (!anchor || delayed || value.frames !== anchor.frames || value.time < anchor.time
+          || Math.abs(value.time - anchor.lastTime) > 4) {
+          anchor = { now: now, time: value.time, lastTime: value.time, frames: value.frames };
+          return null;
+        }
+        anchor.lastTime = value.time;
+        if (now - anchor.now < 4500 || value.time - anchor.time < 1) return null;
+        anchor = null;
+        stage += 1;
+        return stage === 1 ? "nudge" : "reload";
+      },
+    };
+  }
+
   root.TogetherSeeRecovery = {
     createAttemptRegistry: createAttemptRegistry,
     createLoadTracker: createLoadTracker,
     createPlaybackSnapshotQueue: createPlaybackSnapshotQueue,
     createOperationTracker: createOperationTracker,
+    createPlaybackStartController: createPlaybackStartController,
     createAckSingleFlight: createAckSingleFlight,
     createGenerationValue: createGenerationValue,
     createFallbackController: createFallbackController,
+    getContiguousBufferAhead: getContiguousBufferAhead,
+    resumeHlsBuffering: resumeHlsBuffering,
+    createCatchUpRateGuard: createCatchUpRateGuard,
+    createForegroundFrameRecovery: createForegroundFrameRecovery,
     shouldApplyPlaybackSnapshot: shouldApplyPlaybackSnapshot,
   };
 })(typeof window !== "undefined" ? window : globalThis);

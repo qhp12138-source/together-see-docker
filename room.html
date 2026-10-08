@@ -9,8 +9,8 @@
       content="一起See · Together See 同步观影房间，包含视频播放、进度同步、聊天、成员和播放列表。"
     />
     <meta name="theme-color" content="#080b12" />
-    <link rel="icon" type="image/svg+xml" href="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" />
-    <link rel="stylesheet" href="./assets/css/main.css?v=20260904-bilibili-fallback" />
+    <link rel="icon" type="image/svg+xml" href="./assets/icons/together-see.svg?v=20261008-release-freeze" />
+    <link rel="stylesheet" href="./assets/css/main.css?v=20261008-release-freeze" />
   </head>
   <body data-page="room" data-room-access="pending">
     <div class="page-shell room-page">
@@ -20,7 +20,7 @@
 
       <header class="site-header compact-header">
         <a class="brand" href="./index.html" aria-label="一起See 首页">
-          <span class="brand-mark" aria-hidden="true"><img src="./assets/icons/together-see.svg?v=20260904-bilibili-fallback" alt="" /></span>
+          <span class="brand-mark" aria-hidden="true"><img src="./assets/icons/together-see.svg?v=20261008-release-freeze" alt="" /></span>
           <span class="brand-copy">
             <strong>一起See</strong>
             <small>Together See</small>
@@ -77,6 +77,7 @@
                 ></video>
 
                 <div class="danmaku-layer" data-player-danmaku-layer aria-hidden="true"></div>
+                <div class="interaction-layer" data-interaction-layer aria-hidden="true"></div>
 
                 <button class="player-big-toggle" type="button" aria-label="播放" title="播放" data-player-center-play><svg class="control-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.75v10.5L17.25 12z" /></svg></button>
                 <button class="player-lock-toggle" type="button" aria-label="锁定控制器" title="锁定控制器" data-player-control-lock>
@@ -170,6 +171,7 @@
                       <span class="playback-status" data-player-playback-status>等待房主开始</span>
                       <button class="pill-button" type="button" title="切换倍速：1.00x" aria-label="切换倍速，当前 1.00x" data-player-rate>1.00x</button>
                       <button class="pill-button icon-pill" type="button" aria-label="关闭弹幕" title="弹幕开" data-player-danmaku data-danmaku-on="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H11l-4.2 4.2A1 1 0 0 1 5 18.5V15.3A2.5 2.5 0 0 1 3 12.9V5.5zm4 2.2v1.6h8V7.7H8zm0 3.3v1.6h5.7V11H8z" /></svg></button>
+                      <button class="pill-button icon-pill interaction-toolbox" type="button" aria-label="互动" title="互动" aria-haspopup="dialog" aria-expanded="false" aria-controls="interactionPopover" data-interaction-toggle><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg></button>
                       <button class="pill-button icon-pill sync-pill is-active" type="button" aria-label="关闭自动同步" title="自动同步开" data-player-auto-sync data-sync-on="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a7 7 0 0 1 6.33 4H16l3.6 3.6L23.2 9h-2.78A9 9 0 0 0 4.7 4.7l1.42 1.42A6.98 6.98 0 0 1 12 5zm-7.6 6.4L.8 15h2.78A9 9 0 0 0 19.3 19.3l-1.42-1.42A7 7 0 0 1 5.67 15H8l-3.6-3.6z" /></svg></button>
                       <button class="pill-button icon-pill sync-pill" type="button" aria-label="手动同步" title="手动同步" data-player-manual-sync><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9H1l3 3.2L7 12H5a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 12 3zm1 4h-2v5.4l4.4 2.6 1-1.73-3.4-2.02V7z" /></svg></button>
                       <button class="pill-button icon-pill" type="button" aria-label="网页全屏" title="网页全屏" data-page-fullscreen><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13zm2 .5v12h12V6H6zm2 2h4v2H8V8zm8 0v4h-2V8h2zm-8 8v-4h2v4H8zm8 0h-4v-2h4v2z" /></svg></button>
@@ -364,13 +366,13 @@
 
       <footer class="site-disclaimer" aria-label="免责声明">
         <strong>免责声明</strong>
-        <p>本站仅供学习交流与技术研究，不提供、不上传或存储任何视频文件。房间中的链接、弹幕及其他内容均由用户自行提交，请仅使用已获合法授权或依法可使用的内容，并遵守著作权、网络信息内容管理及第三方平台规则。本站不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。</p>
+        <p>本站仅供学习交流与技术研究，不提供影视资源库，不接收或持久保存用户上传的观影视频；短时互动素材由维护者配置。房间中的链接、弹幕及其他内容均由用户自行提交，请仅使用已获合法授权或依法可使用的内容，并遵守著作权、网络信息内容管理及第三方平台规则。本站不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。</p>
       </footer>
     </div>
 
     <div class="toast-stack" data-toast-stack></div>
-    <script src="./assets/js/credentials.js?v=20260904-bilibili-fallback"></script>
-    <script src="./assets/js/site.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/credentials.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/site.js?v=20261008-release-freeze"></script>
       <div class="share-modal" data-share-modal hidden>
         <div class="share-backdrop" data-share-close></div>
         <section class="share-dialog glass-card" role="dialog" aria-modal="true" aria-labelledby="shareDialogTitle">
@@ -424,10 +426,12 @@
         </form>
       </div>
 
-    <script src="./assets/js/recovery.js?v=20260904-bilibili-fallback"></script>
-    <script src="./assets/js/hls.js?v=20260904-bilibili-fallback"></script>
-    <script src="./assets/js/player.js?v=20260904-bilibili-fallback"></script>
-    <script src="/socket.io/socket.io.js?v=20260904-bilibili-fallback"></script>
-    <script src="./assets/js/room.js?v=20260904-bilibili-fallback"></script>
+    <script src="./assets/js/recovery.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/hls.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/direct-media.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/player.js?v=20261008-release-freeze"></script>
+    <script src="/socket.io/socket.io.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/interactions.js?v=20261008-release-freeze"></script>
+    <script src="./assets/js/room.js?v=20261008-release-freeze"></script>
   </body>
 </html>

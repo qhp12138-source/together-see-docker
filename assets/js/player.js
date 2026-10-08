@@ -39,13 +39,16 @@
 
   const rateSteps = [1, 1.25, 1.5, 2, 0.75];
   let currentRateIndex = 0;
+  let basePlaybackRate = 1;
+  let temporaryPlaybackRate = null;
   let currentSource = null;
   let hlsInstance = null;
   let lastHlsSource = null;
   let lastHlsUsingProxy = false;
   let danmakuVisible = loadDanmakuPreference();
-  let danmakuQueue = [];
-  let danmakuLaneAvailableAt = [];
+  let roomDanmakuQueue = [];
+  let sourceDanmakuQueue = [];
+  let danmakuLanes = [];
   let danmakuFlushTimer = null;
   let timelineDanmaku = [];
   let timelineDanmakuKey = "";
@@ -80,6 +83,11 @@
   let mediaProxyGrantRefreshAttempts = 0;
   let mediaLoadCleanup = null;
   let mediaRecoveryTransition = false;
+  let activeHlsLoadUrl = "";
+  let foregroundFrameTimer = null;
+  let videoFrameCallbackId = null;
+  let presentedFrameCount = 0;
+  let foregroundWatchRevision = 0;
 
   const sourceLoadTracker = window.TogetherSeeRecovery.createLoadTracker();
   const initialSeekState = window.TogetherSeeRecovery.createGenerationValue(function (token) {
@@ -88,9 +96,11 @@
   const mediaRecoveryIntentState = window.TogetherSeeRecovery.createGenerationValue(function (token) {
     return sourceLoadTracker.isCurrent(token);
   });
-  const recoveryPlayOperations = window.TogetherSeeRecovery.createOperationTracker();
+  const playbackStartController = window.TogetherSeeRecovery.createPlaybackStartController();
   const userPlayOperations = window.TogetherSeeRecovery.createOperationTracker();
   const proxyFallbackController = window.TogetherSeeRecovery.createFallbackController({ maxAttempts: 1 });
+  const foregroundFrameRecovery = window.TogetherSeeRecovery.createForegroundFrameRecovery();
+  const catchUpRateGuard = window.TogetherSeeRecovery.createCatchUpRateGuard();
 
   const HLS_FORWARD_BUFFER_SECONDS = 120;
   const HLS_MAX_FORWARD_BUFFER_SECONDS = 240;
@@ -108,7 +118,11 @@
   const BUFFER_SPINNER_THRESHOLD = 1.2;
   const DANMAKU_STORAGE_KEY = "together-see:danmaku-visible";
   const DANMAKU_SPEED_PX_PER_SECOND = 105;
-  const DANMAKU_QUEUE_LIMIT = 40;
+  const DANMAKU_SCROLL_GAP = 28;
+  const DANMAKU_NODE_LIMIT = 80;
+  const ROOM_DANMAKU_QUEUE_LIMIT = 40;
+  const SOURCE_DANMAKU_QUEUE_LIMIT = 40;
+  const SOURCE_DANMAKU_MAX_AGE_MS = 500;
 
   const playSvg = `<svg class="control-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.75v10.5L17.25 12z" /></svg>`;
   const pauseSvg = `<svg class="control-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6.5h3.1v11H8zM12.9 6.5H16v11h-3.1z" /></svg>`;
@@ -146,6 +160,85 @@
 
   function dispatchPlaybackUserAction(action) {
     dispatchPlayerEvent("together-see:playback-user-action", { action: action || "update" });
+  }
+
+  function stopForegroundFrameWatch() {
+    foregroundWatchRevision += 1;
+    clearInterval(foregroundFrameTimer);
+    foregroundFrameTimer = null;
+    if (videoFrameCallbackId !== null && typeof video.cancelVideoFrameCallback === "function") {
+      video.cancelVideoFrameCallback(videoFrameCallbackId);
+    }
+    videoFrameCallbackId = null;
+    foregroundFrameRecovery.suspend();
+  }
+
+  function recoverForegroundFrame(action) {
+    const source = currentSource;
+    const previousToken = getCurrentLoadToken();
+    if (!source || !previousToken || sourceLoadTracker.isTerminal(previousToken)) return;
+    dispatchPlayerEvent("together-see:player-frame-recovery", { action: action, generation: previousToken.generation });
+    if (action === "nudge") {
+      setText(playbackStatus, "正在恢复视频画面");
+      try { video.currentTime = video.currentTime; } catch (error) {}
+      return;
+    }
+    const intent = {
+      sourceId: source.id,
+      currentTime: Math.max(0, Number(video.currentTime) || 0),
+      playing: !video.paused,
+      playbackRate: video.playbackRate,
+    };
+    const mediaUrl = video.currentSrc || video.src;
+    const hlsUrl = activeHlsLoadUrl;
+    const useProxy = lastHlsUsingProxy;
+    const token = beginLoadGeneration(source, "frame-recovery");
+    if (source.sourceType === "hls") {
+      loadHlsSource(source, { token: token, useProxy: useProxy, proxyUrl: useProxy ? hlsUrl : undefined,
+        startTime: intent.currentTime, recoveryIntent: intent });
+    } else {
+      bindInitialSeek(intent.currentTime, token);
+      bindMediaRecoveryIntent(intent, token);
+      bindMediaLoadEvents(source, token, mediaUrl);
+      video.load();
+    }
+    startSourceWatchdog(source, token);
+    startForegroundFrameWatch();
+  }
+
+  function startForegroundFrameWatch() {
+    stopForegroundFrameWatch();
+    if (document.visibilityState !== "visible" || !currentSource) return;
+    const supportsFrames = typeof video.requestVideoFrameCallback === "function";
+    if (!supportsFrames && !Number.isFinite(video.webkitDecodedFrameCount)) return;
+    foregroundFrameRecovery.arm(performance.now());
+    const deadline = performance.now() + 30000;
+    const watchRevision = foregroundWatchRevision;
+    function onFrame() {
+      if (watchRevision !== foregroundWatchRevision) return;
+      presentedFrameCount += 1;
+      videoFrameCallbackId = video.requestVideoFrameCallback(onFrame);
+    }
+    if (supportsFrames) videoFrameCallbackId = video.requestVideoFrameCallback(onFrame);
+    foregroundFrameTimer = window.setInterval(function () {
+      if (document.visibilityState !== "visible" || performance.now() > deadline) {
+        stopForegroundFrameWatch();
+        return;
+      }
+      const rect = video.getBoundingClientRect();
+      const token = getCurrentLoadToken();
+      const action = foregroundFrameRecovery.sample({
+        now: performance.now(), time: video.currentTime,
+        frames: supportsFrames ? presentedFrameCount : video.webkitDecodedFrameCount,
+        eligible: Boolean(currentSource && token && !sourceLoadTracker.isTerminal(token)
+          && !video.paused && !video.ended && !video.seeking && !mediaRecoveryTransition
+          && video.readyState >= 3 && video.videoWidth > 0 && video.videoHeight > 0
+          && getForwardBufferSeconds() > BUFFER_SPINNER_THRESHOLD
+          && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight
+          && rect.right > 0 && rect.left < window.innerWidth),
+      });
+      if (action) recoverForegroundFrame(action);
+    }, 500);
   }
 
   function getSourceIdentity(source) {
@@ -214,18 +307,23 @@
 
   function setDesiredPlaybackState(playback) {
     const previousSourceId = desiredPlaybackState?.activeSourceId || "";
+    const previouslyPlaying = desiredPlaybackState?.playing === true;
+    const previouslyBuffering = desiredPlaybackState?.buffering === true;
     desiredPlaybackState = playback ? {
       activeSourceId: playback.activeSourceId || "",
       playing: playback.playing === true,
+      buffering: playback.buffering === true,
       playbackRate: Number.isFinite(Number(playback.playbackRate)) ? Number(playback.playbackRate) : 1,
     } : null;
 
     if (!desiredPlaybackState
       || desiredPlaybackState.playing !== true
       || (previousSourceId && desiredPlaybackState.activeSourceId && previousSourceId !== desiredPlaybackState.activeSourceId)) {
-      recoveryPlayOperations.invalidate();
+      playbackStartController.reset();
       userPlayOperations.invalidate();
     }
+    if (!previouslyPlaying && desiredPlaybackState?.playing) playbackStartController.reset();
+    if (!previouslyBuffering && desiredPlaybackState?.buffering) playbackStartController.suspend();
 
     const token = getCurrentLoadToken();
     if (!token || !desiredPlaybackState) return;
@@ -236,34 +334,59 @@
         playbackRate: desiredPlaybackState.playbackRate,
       });
     });
+    refreshTemporaryPlaybackRate();
   }
 
   function restoreMediaRecoveryIntent(source, token) {
-    const intent = mediaRecoveryIntentState.take(token);
+    const intent = mediaRecoveryIntentState.peek(token);
     if (!intent || (intent.sourceId && source?.id && intent.sourceId !== source.id)) return;
     const safeRate = Number.isFinite(Number(intent.playbackRate)) ? Math.min(3, Math.max(0.25, Number(intent.playbackRate))) : 1;
-    video.playbackRate = safeRate;
+    setExternalPlaybackRate(safeRate);
 
-    recoveryPlayOperations.invalidate();
     if (!intent.playing) {
+      mediaRecoveryIntentState.take(token);
+      playbackStartController.reset();
       if (!video.paused) video.pause();
       syncPlaybackPending = false;
       updatePlaybackControlUi();
       return;
     }
-    if (!video.paused) return;
+    ensurePlaybackStarted();
+  }
 
-    const operation = recoveryPlayOperations.begin([token.generation, token.identity, source?.id || ""].join("|"));
-    Promise.resolve(video.play()).then(function () {
-      if (!recoveryPlayOperations.isCurrent(operation) || !isCurrentLoadToken(token)) return;
-      syncPlaybackPending = false;
-      updatePlaybackControlUi();
-    }).catch(function () {
-      if (!recoveryPlayOperations.isCurrent(operation) || !isCurrentLoadToken(token)) return;
-      syncPlaybackPending = true;
-      updatePlaybackControlUi();
-      setText(playbackStatus, "浏览器需要一次点按才能继续播放");
-      showControls();
+  function ensurePlaybackStarted() {
+    const token = getCurrentLoadToken();
+    const sourceId = currentSource?.id || "";
+    function shouldPlay() {
+      if (!token || !isCurrentLoadToken(token) || currentSource?.id !== sourceId || !video.src || video.ended) return false;
+      if (desiredPlaybackState?.activeSourceId === sourceId) {
+        return desiredPlaybackState.playing && !desiredPlaybackState.buffering;
+      }
+      return mediaRecoveryIntentState.peek(token)?.playing === true;
+    }
+    if (!shouldPlay()) return Promise.resolve(false);
+    if (!video.paused) return Promise.resolve(true);
+    return playbackStartController.request({
+      identity: [token.generation, token.identity, sourceId].join("|"),
+      isCurrent: shouldPlay,
+      play: function () {
+        return Promise.resolve(video.play()).then(function () {
+          if (isCurrentLoadToken(token) && desiredPlaybackState?.activeSourceId === sourceId
+            && desiredPlaybackState.playing === false && !video.paused) video.pause();
+        });
+      },
+      onSuccess: function () {
+        mediaRecoveryIntentState.take(token);
+        syncPlaybackPending = false;
+        updatePlaybackControlUi();
+      },
+      onBlocked: function (reason) {
+        syncPlaybackPending = true;
+        updatePlaybackControlUi();
+        setText(playbackStatus, reason === "gesture" ? "浏览器需要一次点按才能继续播放"
+          : reason === "interrupted" ? "播放启动被中断，请点按播放重试" : "暂时无法播放，请点按重试或更换视频");
+        showControls();
+      },
     });
   }
 
@@ -319,21 +442,44 @@
   }
 
   function getForwardBufferSeconds() {
-    const current = Number(video.currentTime || 0);
-    if (!video.buffered || !video.buffered.length) return 0;
+    return window.TogetherSeeRecovery.getContiguousBufferAhead(video.buffered, video.currentTime);
+  }
 
-    for (let index = 0; index < video.buffered.length; index += 1) {
-      const start = video.buffered.start(index);
-      const end = video.buffered.end(index);
-      if (current >= start - 0.25 && current <= end + 0.25) {
-        return Math.max(0, end - current);
-      }
+  function getBasePlaybackRate() {
+    return desiredPlaybackState && currentSource && desiredPlaybackState.activeSourceId === currentSource.id
+      ? desiredPlaybackState.playbackRate : basePlaybackRate;
+  }
+
+  function refreshTemporaryPlaybackRate() {
+    if (temporaryPlaybackRate === null) return;
+    const base = getBasePlaybackRate();
+    const rate = catchUpRateGuard.select({
+      baseRate: base, requestedRate: temporaryPlaybackRate, bufferedAhead: getForwardBufferSeconds(),
+      eligible: !video.paused && !video.ended && !video.seeking && video.readyState >= 3
+        && !lastBufferingState && !mediaRecoveryTransition,
+    });
+    // Do not resurrect an old correction when fresh data arrives; wait for a new sync request.
+    if (rate === base) temporaryPlaybackRate = null;
+    if (video.playbackRate !== rate) video.playbackRate = rate;
+  }
+
+  function setExternalPlaybackRate(rate, options) {
+    const safeRate = Number.isFinite(Number(rate)) ? Math.min(3, Math.max(0.25, Number(rate))) : 1;
+    if (options?.temporary) {
+      temporaryPlaybackRate = safeRate;
+      refreshTemporaryPlaybackRate();
+      return;
     }
-
-    try {
-      return Math.max(0, video.buffered.end(video.buffered.length - 1) - current);
-    } catch (error) {
-      return 0;
+    basePlaybackRate = safeRate;
+    temporaryPlaybackRate = null;
+    catchUpRateGuard.reset();
+    if (video.playbackRate !== safeRate) video.playbackRate = safeRate;
+    if (rateButton) {
+      const nearestIndex = rateSteps.findIndex(function (step) { return Math.abs(step - safeRate) < 0.001; });
+      if (nearestIndex >= 0) currentRateIndex = nearestIndex;
+      setText(rateButton, safeRate.toFixed(2) + "x");
+      rateButton.setAttribute("title", "切换倍速：" + safeRate.toFixed(2) + "x");
+      rateButton.setAttribute("aria-label", "切换倍速，当前 " + safeRate.toFixed(2) + "x");
     }
   }
 
@@ -354,6 +500,7 @@
 
     const bufferingChanged = lastBufferingState !== shouldSpin;
     lastBufferingState = shouldSpin;
+    refreshTemporaryPlaybackRate();
     shell?.classList.toggle("is-buffering", shouldSpin);
 
     if (statusText) {
@@ -363,6 +510,7 @@
     // 中央缓冲环由 CSS 限定为“控制器可见时才显示”，避免观影时被独立弹出打扰。
     if (bufferingChanged) {
       dispatchPlayerEvent("together-see:player-buffering-change", {
+        generation: getCurrentLoadToken()?.generation,
         buffering: shouldSpin,
         readyState: video.readyState,
         bufferedAhead: getForwardBufferSeconds(),
@@ -378,14 +526,10 @@
   }
 
   function resumeHlsBufferingFromCurrentTime() {
-    if (!hlsInstance) return;
+    const token = getCurrentLoadToken();
+    if (!hlsInstance || !token || sourceLoadTracker.isTerminal(token)) return;
     try {
-      if (typeof hlsInstance.resumeBuffering === "function") {
-        hlsInstance.resumeBuffering();
-      }
-      if (typeof hlsInstance.startLoad === "function") {
-        hlsInstance.startLoad(Number.isFinite(video.currentTime) ? video.currentTime : -1);
-      }
+      window.TogetherSeeRecovery.resumeHlsBuffering(hlsInstance);
     } catch (error) {}
   }
 
@@ -492,7 +636,9 @@
   }
 
   function isControlsInteractionActive() {
-    return controlsPointerInside
+    return shell?.classList.contains("has-interaction-popover")
+      || shell?.classList.contains("is-interaction-placing")
+      || controlsPointerInside
       || controlsFocusInside
       || isEditableControl(document.activeElement);
   }
@@ -557,6 +703,7 @@
   }
 
   function requestMediaProxyUrl(source, routeName) {
+    if (source?.clientDirectOnly === true) return Promise.reject(new Error("本机直连播放项禁止服务器代理"));
     const sourceUrl = source?.sourceUrl || "";
     if (!isHttpUrl(sourceUrl)) return Promise.reject(new Error("视频源地址无效"));
     const ref = source?.refererUrl && isHttpUrl(source.refererUrl)
@@ -641,6 +788,9 @@
   }
 
   function beginLoadGeneration(source, mode) {
+    temporaryPlaybackRate = null;
+    catchUpRateGuard.reset();
+    playbackStartController.reset();
     clearHlsMediaRecoveryTimer();
     clearHlsStallTimeout();
     clearMediaStallFallback();
@@ -656,17 +806,20 @@
   }
 
   function markSourcePlayable(source, token) {
-    if (!sourceLoadTracker.markReady(token)) return;
+    if (!isCurrentLoadToken(token)) return;
+    const firstReady = sourceLoadTracker.markReady(token);
     clearSourceWatchdog();
     clearHlsMediaRecoveryTimer();
     clearHlsStallTimeout();
     mediaRecoveryTransition = false;
     restoreMediaRecoveryIntent(source, token);
     dispatchReadyForSync();
-    dispatchPlayerEvent("together-see:player-source-ready", {
-      source: source,
-      generation: token.generation,
-    });
+    if (firstReady) {
+      dispatchPlayerEvent("together-see:player-source-ready", {
+        source: source,
+        generation: token.generation,
+      });
+    }
     updatePlayButton();
   }
 
@@ -677,7 +830,7 @@
     if (source.sourceType === "video" && lastMediaUsingProxy && retryMediaProxyGrant("播放授权已更新")) return;
     if (source.sourceType === "hls" && tryHlsProxyFallback("原生 HLS 加载失败")) return;
     if (source.sourceType === "video" && tryMediaProxyFallback("直链加载失败")) return;
-    if (source.sourceType === "hls" && video.error?.code === 3 && tryHlsMediaRecovery(hlsInstance, source, token)) return;
+    if (!source.clientDirectOnly && source.sourceType === "hls" && video.error?.code === 3 && tryHlsMediaRecovery(hlsInstance, source, token)) return;
 
     const dispatched = dispatchTerminalSourceError(source, "media-error", {
       errorCode: video.error?.code || null,
@@ -689,7 +842,9 @@
     if (empty) empty.hidden = false;
     setText(sourceStatus, "视频源加载失败");
     setText(playbackStatus, "请检查链接是否允许跨站播放");
-    setText(emptyText, "浏览器无法加载这个视频源，可能是跨域、防盗链、签名过期、编码不兼容或链接本身不可播放。系统已完成有限次数的直连与兼容加载尝试。");
+    setText(emptyText, source.clientDirectOnly
+      ? "本机直连播放失败，可能是跨域、签名过期或编码不兼容。请更换来源；不会使用服务器代理或重复解析。"
+      : "浏览器无法加载这个视频源，可能是跨域、防盗链、签名过期、编码不兼容或链接本身不可播放。系统已完成有限次数的直连与兼容加载尝试。");
   }
 
   function isExpectedMediaUrl(expectedUrl) {
@@ -781,6 +936,7 @@
   }
 
   function shouldUseHlsProxyFirst(source, options) {
+    if (source?.clientDirectOnly === true) return false;
     if (options?.useProxy === true) return true;
     if (options?.useProxy === false) return false;
     if (!source?.sourceUrl) return false;
@@ -828,6 +984,7 @@
   }
 
   function tryHlsProxyFallback(reason) {
+    if (lastHlsSource?.clientDirectOnly === true) return false;
     if (!lastHlsSource || lastHlsUsingProxy) return false;
     const recoveryIntent = captureMediaRecoveryIntent(lastHlsSource);
     const fallback = proxyFallbackController.begin(getSourceIdentity(lastHlsSource), recoveryIntent);
@@ -847,6 +1004,7 @@
   }
 
   function tryMediaProxyFallback(reason) {
+    if (lastMediaSource?.clientDirectOnly === true) return false;
     if (!lastMediaSource || lastMediaUsingProxy || lastMediaSource.sourceType !== "video") return false;
     const recoveryIntent = captureMediaRecoveryIntent(lastMediaSource);
     const fallback = proxyFallbackController.begin(getSourceIdentity(lastMediaSource), recoveryIntent);
@@ -865,7 +1023,7 @@
       bindMediaLoadEvents(lastMediaSource, token, proxyUrl);
       video.src = proxyUrl;
       video.load();
-      video.playbackRate = Math.min(3, Math.max(0.25, Number(recoveryIntent.playbackRate) || 1));
+      setExternalPlaybackRate(recoveryIntent.playbackRate);
       startSourceWatchdog(lastMediaSource, token);
     }).catch(function (error) {
       if (!sourceLoadTracker.isCurrent(token)) return;
@@ -878,6 +1036,7 @@
   }
 
   function retryHlsProxyGrant(reason) {
+    if (lastHlsSource?.clientDirectOnly === true) return false;
     if (!lastHlsSource || !lastHlsUsingProxy || hlsProxyGrantRefreshAttempts >= 1) return false;
     hlsProxyGrantRefreshAttempts += 1;
     const recoveryIntent = captureMediaRecoveryIntent(lastHlsSource);
@@ -895,6 +1054,7 @@
   }
 
   function retryMediaProxyGrant(reason) {
+    if (lastMediaSource?.clientDirectOnly === true) return false;
     if (!lastMediaSource || !lastMediaUsingProxy || mediaProxyGrantRefreshAttempts >= 1) return false;
     mediaProxyGrantRefreshAttempts += 1;
     const recoveryIntent = captureMediaRecoveryIntent(lastMediaSource);
@@ -909,7 +1069,7 @@
       bindMediaLoadEvents(lastMediaSource, token, proxyUrl);
       video.src = proxyUrl;
       video.load();
-      video.playbackRate = Math.min(3, Math.max(0.25, Number(recoveryIntent.playbackRate) || 1));
+      setExternalPlaybackRate(recoveryIntent.playbackRate);
       startSourceWatchdog(lastMediaSource, token);
     }).catch(function (error) {
       if (!sourceLoadTracker.isCurrent(token)) return;
@@ -919,6 +1079,32 @@
     });
     startSourceWatchdog(lastMediaSource, token);
     return true;
+  }
+
+  function createDirectHlsLoadPolicy(timeoutMs) {
+    function shouldRetry(retryConfig, retryCount, isTimeout, response) {
+      if (!retryConfig || retryCount >= retryConfig.maxNumRetry) return false;
+      const status = response?.code;
+      if (status === 401 || status === 403 || status === 404) return false;
+      // Missing responses from parsing errors must not look like transport errors.
+      return isTimeout || status === 0 || status === 408 || status === 429
+        || (status >= 500 && status <= 599);
+    }
+    const retry = {
+      maxNumRetry: 2,
+      retryDelayMs: 500,
+      maxRetryDelayMs: 1000,
+      backoff: "exponential",
+      shouldRetry: shouldRetry,
+    };
+    return {
+      default: {
+        maxTimeToFirstByteMs: timeoutMs,
+        maxLoadTimeMs: timeoutMs,
+        timeoutRetry: Object.assign({}, retry),
+        errorRetry: Object.assign({}, retry),
+      },
+    };
   }
 
   function loadHlsSource(source, options) {
@@ -949,6 +1135,7 @@
     }
 
     lastHlsSource = source;
+    activeHlsLoadUrl = loadUrl;
     lastHlsUsingProxy = useProxy;
     video.dataset.hlsProxy = useProxy ? "true" : "false";
 
@@ -988,18 +1175,25 @@
       maxFragLookUpTolerance: 0.25,
       nudgeOffset: 0.1,
       nudgeMaxRetry: 6,
-      manifestLoadingTimeOut: 20000,
-      manifestLoadingMaxRetry: 3,
-      manifestLoadingRetryDelay: 500,
-      manifestLoadingMaxRetryTimeout: 10000,
-      levelLoadingTimeOut: 20000,
-      levelLoadingMaxRetry: 5,
-      levelLoadingRetryDelay: 500,
-      levelLoadingMaxRetryTimeout: 12000,
-      fragLoadingTimeOut: 30000,
-      fragLoadingMaxRetry: 10,
-      fragLoadingRetryDelay: 500,
-      fragLoadingMaxRetryTimeout: 12000,
+      ...(source.clientDirectOnly ? {
+        manifestLoadPolicy: createDirectHlsLoadPolicy(20000),
+        playlistLoadPolicy: createDirectHlsLoadPolicy(20000),
+        fragLoadPolicy: createDirectHlsLoadPolicy(30000),
+        keyLoadPolicy: createDirectHlsLoadPolicy(20000),
+      } : {
+        manifestLoadingTimeOut: 20000,
+        manifestLoadingMaxRetry: 3,
+        manifestLoadingRetryDelay: 500,
+        manifestLoadingMaxRetryTimeout: 10000,
+        levelLoadingTimeOut: 20000,
+        levelLoadingMaxRetry: 5,
+        levelLoadingRetryDelay: 500,
+        levelLoadingMaxRetryTimeout: 12000,
+        fragLoadingTimeOut: 30000,
+        fragLoadingMaxRetry: 10,
+        fragLoadingRetryDelay: 500,
+        fragLoadingMaxRetryTimeout: 12000,
+      }),
       appendErrorMaxRetry: 6,
     });
 
@@ -1030,6 +1224,14 @@
       if (instance !== hlsInstance || !sourceLoadTracker.isCurrent(loadToken)) return;
       const detail = data?.details || data?.type || "未知错误";
       const detailText = String(detail);
+      const status = data?.response?.code ?? data?.networkDetails?.status;
+
+      // Hls playlist failover can schedule a retry even when shouldRetry rejects it.
+      // Destroying the direct-only instance below also cancels that pending retry.
+      if (source.clientDirectOnly && (
+        (status >= 400 && status < 500 && status !== 408 && status !== 429)
+        || /^(manifestParsingError|levelParsingError|levelEmptyError)$/.test(detailText)
+      )) data.fatal = true;
 
       if (/buffer(Stalled|Nudge|Seek|Append)|buffer/i.test(detailText) && !data?.fatal) {
         recoverHlsStall(detailText);
@@ -1044,7 +1246,7 @@
       if (!useProxy && data.type === window.Hls.ErrorTypes.NETWORK_ERROR && tryHlsProxyFallback(detail)) return;
       if (useProxy && data.type === window.Hls.ErrorTypes.NETWORK_ERROR && retryHlsProxyGrant(detail)) return;
 
-      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && tryHlsMediaRecovery(instance, source, loadToken)) return;
+      if (!source.clientDirectOnly && data.type === window.Hls.ErrorTypes.MEDIA_ERROR && tryHlsMediaRecovery(instance, source, loadToken)) return;
 
       destroyHlsInstance();
       dispatchTerminalSourceError(source, detailText, { hls: data }, loadToken);
@@ -1055,6 +1257,10 @@
   }
 
   function resetVideoElement() {
+    temporaryPlaybackRate = null;
+    catchUpRateGuard.reset();
+    stopForegroundFrameWatch();
+    activeHlsLoadUrl = "";
     clearSourceWatchdog();
     clearHlsStallTimeout();
     clearMediaStallFallback();
@@ -1071,7 +1277,7 @@
     initialSeekState.clear();
     mediaRecoveryIntentState.clear();
     mediaRecoveryTransition = false;
-    recoveryPlayOperations.invalidate();
+    playbackStartController.reset();
     userPlayOperations.invalidate();
     setBufferingState(false);
     clearInterval(pauseBufferTimer);
@@ -1092,6 +1298,7 @@
   }
 
   function setPendingState(item, message) {
+    foregroundFrameRecovery.reset("");
     sourceLoadTracker.invalidate();
     currentSource = item || null;
     clearDanmaku();
@@ -1127,7 +1334,13 @@
       sourceType: item?.sourceType || guessSourceType(item?.sourceUrl || item?.pageUrl || ""),
       localFile: item?.localFile || null,
       bilibili: item?.bilibili || null,
+      clientDirectOnly: item?.clientDirectOnly === true,
     };
+
+    if (source.clientDirectOnly && (source.bilibili || !window.TogetherSeeDirectMedia?.isAllowedUrl(source.sourceUrl))) {
+      setPendingState(source, "该来源不支持本机直连模式，请使用正常解析流程。");
+      return false;
+    }
 
     if (source.sourceType === "local" && (!source.sourceUrl || source.sourceUrl.startsWith("local:"))) {
       setPendingState(source, "这是房间内的本地视频条目。浏览器不能把本地文件直接共享给其他成员，请在本机选择同一个视频文件后再同步播放。");
@@ -1151,10 +1364,12 @@
     }
     const isSameSource = !options?.forceReload && currentSource
       && currentSource.id === source.id
+      && currentSource.clientDirectOnly === source.clientDirectOnly
       && video.dataset.sourceId === source.id
       && video.dataset.sourceUrl === source.sourceUrl
       && video.src;
 
+    foregroundFrameRecovery.reset(getSourceIdentity(source));
     currentSource = source;
     shell?.classList.add("has-source", "is-controls-visible");
     shell?.classList.remove("is-pending", "is-controls-hidden");
@@ -1165,6 +1380,7 @@
       clearDanmaku();
       clearTimelineDanmaku();
       resetVideoElement();
+      video.removeAttribute("crossorigin");
       const loadToken = beginLoadGeneration(source, "direct");
       const requestedPlaybackIntent = createLoadPlaybackIntent(source, options);
       bindMediaRecoveryIntent(requestedPlaybackIntent, loadToken);
@@ -1211,7 +1427,7 @@
         ? "HLS 视频源"
         : "直接视频源";
     setTextAll(sourceChips, sourceLabel);
-    setTextAll(modeChips, source.sourceType === "local" ? "本地文件同步" : source.sourceType === "hls" ? "HLS 兼容播放" : "浏览器播放");
+    setTextAll(modeChips, source.clientDirectOnly ? "本机直连" : source.sourceType === "local" ? "本地文件同步" : source.sourceType === "hls" ? "HLS 兼容播放" : "浏览器播放");
     setTextAll(stageTimes, "00:00 / 读取时长中");
     setText(stageClock, source.title);
     setText(sourceStatus, "视频源已加载");
@@ -1229,6 +1445,7 @@
     }
 
     if (!playbackControlEnabled && syncPlaybackPending && video.paused) {
+      playbackStartController.reset();
       const loadToken = getCurrentLoadToken();
       const operation = userPlayOperations.begin([loadToken?.generation || 0, currentSource?.id || "", "sync-resume"].join("|"));
       try {
@@ -1247,8 +1464,14 @@
     if (!ensurePlaybackControl()) return;
 
     if (video.paused) {
+      playbackStartController.reset();
       const loadToken = getCurrentLoadToken();
+      mediaRecoveryIntentState.update(loadToken, function (intent) { return Object.assign({}, intent, { playing: true }); });
+      if (desiredPlaybackState?.activeSourceId === currentSource.id) desiredPlaybackState.playing = true;
       const operation = userPlayOperations.begin([loadToken?.generation || 0, currentSource?.id || "", "user-play"].join("|"));
+      dispatchPlayerEvent("together-see:playback-user-intent", {
+        action: "play", stage: "pending", sourceId: currentSource.id, generation: loadToken?.generation,
+      });
       try {
         clearInterval(pauseBufferTimer);
         pauseBufferTimer = null;
@@ -1258,9 +1481,15 @@
         showControls();
       } catch (error) {
         if (!userPlayOperations.isCurrent(operation) || (loadToken && !isCurrentLoadToken(loadToken))) return;
+        dispatchPlayerEvent("together-see:playback-user-intent", {
+          action: "play", stage: "failed", sourceId: currentSource.id, generation: loadToken?.generation,
+        });
         setText(playbackStatus, "浏览器阻止自动播放，请手动点击视频控件");
       }
     } else {
+      playbackStartController.reset();
+      mediaRecoveryIntentState.clear();
+      if (desiredPlaybackState) desiredPlaybackState.playing = false;
       userPlayOperations.invalidate();
       video.pause();
       dispatchPlaybackUserAction("pause");
@@ -1279,6 +1508,7 @@
   }
 
   function updateBufferUi() {
+    refreshTemporaryPlaybackRate();
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
     if (!duration || !video.buffered.length) {
       setProgress(progressBuffer, 0);
@@ -1303,10 +1533,7 @@
     if (!ensurePlaybackControl()) return;
     currentRateIndex = (currentRateIndex + 1) % rateSteps.length;
     const rate = rateSteps[currentRateIndex];
-    video.playbackRate = rate;
-    setText(rateButton, rate.toFixed(2) + "x");
-    rateButton?.setAttribute("title", "切换倍速：" + rate.toFixed(2) + "x");
-    rateButton?.setAttribute("aria-label", "切换倍速，当前 " + rate.toFixed(2) + "x");
+    setExternalPlaybackRate(rate);
     setText(playbackStatus, "倍速 " + rate.toFixed(2) + "x");
     dispatchPlaybackUserAction("rate");
     showControls();
@@ -1315,15 +1542,44 @@
   function clearDanmaku() {
     window.clearTimeout(danmakuFlushTimer);
     danmakuFlushTimer = null;
-    danmakuQueue = [];
-    danmakuLaneAvailableAt = [];
+    roomDanmakuQueue = [];
+    sourceDanmakuQueue = [];
+    danmakuLanes.forEach(function (_, index) { releaseDanmakuLane(index); });
+    danmakuLanes = [];
     if (danmakuLayer) danmakuLayer.innerHTML = "";
   }
 
   function clearSourceDanmakuDisplay() {
-    danmakuQueue = danmakuQueue.filter(function (message) { return message.kind !== "source"; });
-    danmakuLayer?.querySelectorAll(".is-source-danmaku").forEach(function (node) { node.remove(); });
-    danmakuLaneAvailableAt = [];
+    sourceDanmakuQueue = [];
+    danmakuLanes.forEach(function (lane, index) {
+      if (lane?.kind === "source") releaseDanmakuLane(index);
+    });
+    flushDanmakuQueue();
+  }
+
+  function releaseDanmakuLane(index) {
+    const lane = danmakuLanes[index];
+    if (!lane) return;
+    lane.nodes.forEach(function (entry) {
+      window.clearTimeout(entry.timer);
+      entry.node.remove();
+    });
+    danmakuLanes[index] = null;
+  }
+
+  function releaseDanmakuNode(index, lane, entry) {
+    if (danmakuLanes[index] !== lane) return;
+    const entryIndex = lane.nodes.indexOf(entry);
+    if (entryIndex < 0) return;
+    window.clearTimeout(entry.timer);
+    entry.node.remove();
+    lane.nodes.splice(entryIndex, 1);
+    if (!lane.nodes.length) danmakuLanes[index] = null;
+    else lane.availableAt = lane.nodes[lane.nodes.length - 1].readyAt;
+  }
+
+  function getDanmakuNodeCount() {
+    return danmakuLanes.reduce(function (count, lane) { return count + (lane ? lane.nodes.length : 0); }, 0);
   }
 
   function findTimelineIndex(time) {
@@ -1421,9 +1677,14 @@
   }
 
   function getDanmakuLaneCount() {
-    if (!danmakuLayer) return 0;
-    const laneHeight = window.innerWidth <= 760 ? 25 : 30;
-    return Math.max(1, Math.min(7, Math.floor(danmakuLayer.clientHeight / laneHeight)));
+    if (!danmakuLayer || !shell) return 0;
+    const height = Math.min(danmakuLayer.clientHeight, shell.clientHeight / 3 - danmakuLayer.offsetTop);
+    return Math.max(0, Math.min(7, Math.floor(height / getDanmakuLaneHeight())));
+  }
+
+  function getDanmakuLaneHeight() {
+    // Include room-message borders and a small gap in the visual track height.
+    return window.innerWidth <= 760 ? 28 : 34;
   }
 
   function scheduleDanmakuFlush(delay) {
@@ -1438,38 +1699,82 @@
     item.textContent = message.text;
     item.dataset.danmakuId = message.id || "";
     item.dataset.senderId = message.senderId || "";
+    item.dataset.danmakuLane = String(laneIndex);
     item.style.top = (laneIndex * laneHeight) + "px";
+    item.style.lineHeight = (laneHeight - 4) + "px";
     if (message.color) item.style.color = message.color;
     if (message.fontSize) item.style.fontSize = Math.min(22, Math.max(13, message.fontSize * 0.72)) + "px";
     danmakuLayer.appendChild(item);
 
+    const layerWidth = Math.max(1, danmakuLayer.clientWidth);
+    let durationMs = 4000;
+    let entryDelayMs = durationMs;
     if (message.mode === "top" || message.mode === "bottom") {
       item.classList.add(message.mode === "top" ? "is-fixed-top" : "is-fixed-bottom");
-      if (message.mode === "bottom") {
-        item.style.top = Math.max(0, danmakuLayer.clientHeight - ((laneIndex + 1) * laneHeight)) + "px";
-      }
-      item.classList.remove("is-measuring");
-      window.setTimeout(function () {
-        item.remove();
-        flushDanmakuQueue();
-      }, 4000);
-      danmakuLaneAvailableAt[laneIndex] = performance.now() + 4100;
-      return;
+    } else {
+      const textWidth = Math.max(1, item.getBoundingClientRect().width);
+      durationMs = ((layerWidth + textWidth) / DANMAKU_SPEED_PX_PER_SECOND) * 1000;
+      entryDelayMs = ((textWidth + DANMAKU_SCROLL_GAP) / DANMAKU_SPEED_PX_PER_SECOND) * 1000;
+      item.style.setProperty("--danmaku-start", layerWidth + "px");
+      item.style.setProperty("--danmaku-end", (-textWidth) + "px");
+      item.style.setProperty("--danmaku-duration", durationMs + "ms");
     }
-
-    const layerWidth = Math.max(1, danmakuLayer.clientWidth);
-    const textWidth = Math.max(1, item.getBoundingClientRect().width);
-    const durationMs = Math.min(14000, Math.max(7000, ((layerWidth + textWidth) / DANMAKU_SPEED_PX_PER_SECOND) * 1000));
-    item.style.setProperty("--danmaku-start", layerWidth + "px");
-    item.style.setProperty("--danmaku-end", (-textWidth) + "px");
-    item.style.setProperty("--danmaku-duration", durationMs + "ms");
     item.classList.remove("is-measuring");
-    item.addEventListener("animationend", function () {
-      item.remove();
+    const now = performance.now();
+    const lane = danmakuLanes[laneIndex] || { kind: message.kind, mode: message.mode, width: layerWidth, nodes: [], availableAt: 0 };
+    const entry = { node: item, endsAt: now + durationMs, readyAt: now + entryDelayMs, timer: null };
+    lane.nodes.push(entry);
+    lane.availableAt = entry.readyAt;
+    danmakuLanes[laneIndex] = lane;
+    function finish() {
+      // Completion belongs to one node, not its followers or a reused visual lane.
+      releaseDanmakuNode(laneIndex, lane, entry);
       flushDanmakuQueue();
-    }, { once: true });
+    }
+    item.addEventListener("animationend", finish, { once: true });
+    entry.timer = window.setTimeout(finish, durationMs);
+  }
 
-    danmakuLaneAvailableAt[laneIndex] = performance.now() + ((textWidth + 28) / DANMAKU_SPEED_PX_PER_SECOND) * 1000;
+  function isSourceDanmakuFresh(message, now) {
+    return !video.paused && !video.ended && !video.seeking && !timelineDanmakuSeeking
+      && now - message.queuedAt < SOURCE_DANMAKU_MAX_AGE_MS
+      && Math.abs((Number(video.currentTime) || 0) - message.time) <= SOURCE_DANMAKU_MAX_AGE_MS / 1000;
+  }
+
+  function findDanmakuLane(message, laneCount) {
+    // Lane zero is a real top track reserved for room messages on multi-track layouts.
+    const first = message.kind === "source" && laneCount > 1 ? 1 : 0;
+    const availableLanes = [];
+    const now = performance.now();
+    if (getDanmakuNodeCount() < DANMAKU_NODE_LIMIT) {
+      for (let step = 0; step < laneCount - first; step += 1) {
+        const index = message.mode === "bottom" ? laneCount - 1 - step : first + step;
+        const lane = danmakuLanes[index];
+        if (!lane || (canFollowDanmakuLane(lane, message) && lane.availableAt <= now
+          && lane.nodes[lane.nodes.length - 1].node.getBoundingClientRect().right <= danmakuLayer.getBoundingClientRect().right - DANMAKU_SCROLL_GAP)) {
+          availableLanes.push(index);
+        }
+      }
+    }
+    if (availableLanes.length) {
+      return message.mode === "scroll"
+        ? availableLanes[Math.floor(Math.random() * availableLanes.length)]
+        : availableLanes[0];
+    }
+    if (message.kind === "room") {
+      const sourceLane = danmakuLanes.findIndex(function (lane, index) { return index < laneCount && lane?.kind === "source"; });
+      if (sourceLane >= 0) {
+        releaseDanmakuLane(sourceLane);
+        return sourceLane;
+      }
+    }
+    return -1;
+  }
+
+  function canFollowDanmakuLane(lane, message) {
+    // A changed layer width needs a fresh track; otherwise equal px/s prevents catch-up.
+    return message.mode === "scroll" && lane.mode === "scroll" && lane.kind === message.kind
+      && lane.width === Math.max(1, danmakuLayer.clientWidth);
   }
 
   function flushDanmakuQueue() {
@@ -1477,42 +1782,67 @@
     danmakuFlushTimer = null;
     if (!danmakuVisible || !danmakuLayer || !shell?.classList.contains("has-source")) return;
 
+    const now = performance.now();
     const laneCount = getDanmakuLaneCount();
-    const laneHeight = window.innerWidth <= 760 ? 25 : 30;
-    if (danmakuLaneAvailableAt.length !== laneCount) {
-      danmakuLaneAvailableAt = Array.from({ length: laneCount }, function (_, index) {
-        return danmakuLaneAvailableAt[index] || 0;
-      });
-    }
-
-    while (danmakuQueue.length) {
-      const now = performance.now();
-      const availableLanes = [];
-      danmakuLaneAvailableAt.forEach(function (availableAt, index) {
-        if (availableAt <= now) availableLanes.push(index);
-      });
-      if (!availableLanes.length) {
-        scheduleDanmakuFlush(Math.min.apply(null, danmakuLaneAvailableAt) - now);
-        return;
+    const laneHeight = getDanmakuLaneHeight();
+    sourceDanmakuQueue = sourceDanmakuQueue.filter(function (message) { return isSourceDanmakuFresh(message, now); });
+    danmakuLanes.forEach(function (lane, index) {
+      if (index >= laneCount || (laneCount > 1 && index === 0 && lane?.kind === "source")) releaseDanmakuLane(index);
+      else if (lane) {
+        lane.nodes.slice().forEach(function (entry) {
+          if (entry.endsAt <= now) releaseDanmakuNode(index, lane, entry);
+          else {
+            entry.node.style.top = (index * laneHeight) + "px";
+            entry.node.style.lineHeight = (laneHeight - 4) + "px";
+          }
+        });
       }
-      const laneIndex = availableLanes[Math.floor(Math.random() * availableLanes.length)];
-      spawnDanmaku(danmakuQueue.shift(), laneIndex, laneHeight);
+    });
+    danmakuLanes.length = laneCount;
+
+    while (roomDanmakuQueue.length || sourceDanmakuQueue.length) {
+      const queue = roomDanmakuQueue.length ? roomDanmakuQueue : sourceDanmakuQueue;
+      const laneIndex = findDanmakuLane(queue[0], laneCount);
+      if (laneIndex < 0) break;
+      spawnDanmaku(queue.shift(), laneIndex, laneHeight);
+    }
+    if (roomDanmakuQueue.length || sourceDanmakuQueue.length) {
+      const next = roomDanmakuQueue[0] || sourceDanmakuQueue[0];
+      const hasNodeCapacity = getDanmakuNodeCount() < DANMAKU_NODE_LIMIT;
+      const deadlines = [];
+      danmakuLanes.forEach(function (lane) {
+        if (!lane) return;
+        lane.nodes.forEach(function (entry) { deadlines.push(entry.endsAt); });
+        if (hasNodeCapacity && canFollowDanmakuLane(lane, next)) {
+          // If rendering lags the clock, recheck the real tail before admitting a follower.
+          deadlines.push(Math.max(now + 16, lane.availableAt));
+        }
+      });
+      sourceDanmakuQueue.forEach(function (message) { deadlines.push(message.queuedAt + SOURCE_DANMAKU_MAX_AGE_MS); });
+      scheduleDanmakuFlush(deadlines.length ? Math.min.apply(null, deadlines) - now : 250);
     }
   }
 
   function showDanmaku(message) {
     const text = String(message?.text || "").replace(/\s+/g, " ").trim().slice(0, 100);
     if (!text || !danmakuVisible || !shell?.classList.contains("has-source")) return false;
-    danmakuQueue.push({
+    const kind = message?.kind === "source" ? "source" : "room";
+    const queue = kind === "source" ? sourceDanmakuQueue : roomDanmakuQueue;
+    const entry = {
       id: String(message?.id || ""),
       senderId: String(message?.senderId || ""),
       text: text,
       mode: message?.mode === "top" || message?.mode === "bottom" ? message.mode : "scroll",
       color: /^#[0-9a-f]{6}$/i.test(String(message?.color || "")) ? String(message.color) : "",
       fontSize: Number.isFinite(Number(message?.fontSize)) ? Number(message.fontSize) : null,
-      kind: message?.kind === "source" ? "source" : "room",
-    });
-    if (danmakuQueue.length > DANMAKU_QUEUE_LIMIT) danmakuQueue.shift();
+      kind: kind,
+      time: Number.isFinite(Number(message?.time)) ? Number(message.time) : (Number(video.currentTime) || 0),
+      queuedAt: performance.now(),
+    };
+    if (kind === "source" && !isSourceDanmakuFresh(entry, entry.queuedAt)) return false;
+    queue.push(entry);
+    const limit = kind === "source" ? SOURCE_DANMAKU_QUEUE_LIMIT : ROOM_DANMAKU_QUEUE_LIMIT;
+    if (queue.length > limit) queue.shift();
     flushDanmakuQueue();
     return true;
   }
@@ -1598,12 +1928,14 @@
     controlLockButton.setAttribute("title", controlsLocked ? "解锁控制器" : "锁定控制器");
     controlLockButton.setAttribute("aria-label", controlsLocked ? "解锁控制器" : "锁定控制器");
     shell?.classList.toggle("is-controls-locked", controlsLocked);
+    if (controls) controls.inert = controlsLocked;
   }
 
   function toggleControlLock(event) {
     event?.stopPropagation();
     controlsLocked = !controlsLocked;
     updateControlLockUi();
+    dispatchPlayerEvent("together-see:control-lock-change", { locked: controlsLocked });
     if (controlsLocked) {
       hideControlsNow();
       showLockTemporarily();
@@ -1784,18 +2116,19 @@
   }
 
   function handlePlayerShortcut(event) {
-    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || isEditableTarget(event.target)) return;
-
-    const key = event.key;
-    const lowerKey = typeof key === "string" ? key.toLowerCase() : "";
-
-    if (key === "Escape") {
+    if (event.key === "Escape" && !event.defaultPrevented) {
+      if (controlsLocked) toggleControlLock();
       if (shell?.classList.contains("is-page-fullscreen")) {
         event.preventDefault();
         exitPageFullscreen();
       }
       return;
     }
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || isEditableTarget(event.target)) return;
+    if (controlsLocked) return;
+
+    const key = event.key;
+    const lowerKey = typeof key === "string" ? key.toLowerCase() : "";
 
     switch (key) {
       case "ArrowLeft":
@@ -1864,6 +2197,10 @@
   progressTrack?.addEventListener("pointerleave", hideProgressHover);
 
   shell?.addEventListener("pointermove", showControls);
+  shell?.addEventListener("together-see:interaction-ui-change", function () {
+    if (isControlsInteractionActive()) keepControlsVisible();
+    else showControls();
+  });
   shell?.addEventListener("pointerenter", showControls);
   shell?.addEventListener("pointerleave", function () {
     if (currentSource && shell?.classList.contains("has-source")) {
@@ -1918,6 +2255,7 @@
   video.addEventListener("loadedmetadata", updatePlayButton);
   video.addEventListener("durationchange", updateTimeUi);
   video.addEventListener("timeupdate", function () {
+    refreshTemporaryPlaybackRate();
     updateTimeUi();
     processTimelineDanmaku();
     refreshBufferingFromMediaState();
@@ -1941,7 +2279,7 @@
       window.cancelAnimationFrame(timelineDanmakuAnimationFrame);
       timelineDanmakuAnimationFrame = null;
     }
-    clearDanmaku();
+    clearSourceDanmakuDisplay();
     setBufferingState(true, "定位中", { allowPausedSpinner: true });
   });
   video.addEventListener("seeked", function () {
@@ -1987,6 +2325,14 @@
   });
 
   document.addEventListener("keydown", handlePlayerShortcut);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") startForegroundFrameWatch();
+    else stopForegroundFrameWatch();
+  });
+  window.addEventListener("pagehide", stopForegroundFrameWatch);
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) startForegroundFrameWatch();
+  });
 
   document.addEventListener("fullscreenchange", function () {
     clearDanmaku();
@@ -2042,17 +2388,7 @@
     setAutoSyncEnabled: function (enabled) { if (Boolean(enabled) !== autoSyncEnabled) toggleAutoSync(); },
     getPreferredPlaybackRate: function () { return rateSteps[currentRateIndex] || 1; },
     setPlaybackStatus: function (text) { setText(playbackStatus, text); },
-    setExternalPlaybackRate: function (rate, options) {
-      const safeRate = Number.isFinite(Number(rate)) ? Math.min(3, Math.max(0.25, Number(rate))) : 1;
-      video.playbackRate = safeRate;
-      if (!options?.temporary && rateButton) {
-        const nearestIndex = rateSteps.findIndex(function (step) { return Math.abs(step - safeRate) < 0.001; });
-        if (nearestIndex >= 0) currentRateIndex = nearestIndex;
-        setText(rateButton, safeRate.toFixed(2) + "x");
-        rateButton.setAttribute("title", "切换倍速：" + safeRate.toFixed(2) + "x");
-        rateButton.setAttribute("aria-label", "切换倍速，当前 " + safeRate.toFixed(2) + "x");
-      }
-    },
+    setExternalPlaybackRate: setExternalPlaybackRate,
     triggerManualSync: triggerManualSync,
     isControlLocked: function () { return controlsLocked; },
     getForwardBufferSeconds: getForwardBufferSeconds,
@@ -2086,6 +2422,7 @@
     getLoadToken: getCurrentLoadToken,
     isLoadTokenCurrent: isCurrentLoadToken,
     setDesiredPlaybackState: setDesiredPlaybackState,
+    ensurePlaybackStarted: ensurePlaybackStarted,
     setPlaybackControlEnabled: function (enabled) {
       playbackControlEnabled = Boolean(enabled);
       if (playbackControlEnabled) syncPlaybackPending = false;

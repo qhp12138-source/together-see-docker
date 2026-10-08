@@ -33,6 +33,7 @@ export interface ParsedVideoSource {
   finalUrl?: string;
   refererUrl?: string;
   bilibili?: BilibiliSourceMeta;
+  browserDirectCandidate?: { url: string; type: 'hls' | 'video' };
 }
 
 export interface LocalFileMeta {
@@ -52,6 +53,7 @@ export interface PlaylistItem {
   addedBy?: string;
   localFile?: LocalFileMeta | null;
   requiresClientParse?: boolean;
+  clientDirectOnly?: boolean;
   parseMessage?: string;
   finalUrl?: string;
   refererUrl?: string;

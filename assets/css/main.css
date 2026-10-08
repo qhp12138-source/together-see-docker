@@ -437,7 +437,7 @@ body[data-room-access]:not([data-room-access="granted"]) [data-share-room] {
   transition: opacity .16s ease, color .16s ease;
 }
 .player-shell.is-lock-visible .player-lock-toggle,
-.player-shell.is-control-locked:hover .player-lock-toggle { opacity:1; pointer-events:auto; }
+.player-shell.is-controls-locked .player-lock-toggle { opacity:1; pointer-events:auto; }
 .player-lock-toggle:hover { color:#fff; }
 
 .player-controls-overlay {
@@ -455,6 +455,8 @@ body[data-room-access]:not([data-room-access="granted"]) [data-share-room] {
 }
 .player-shell.is-controls-visible .player-controls-overlay,
 .player-shell:not(.has-source) .player-controls-overlay { opacity:1; transform: translateY(0); pointer-events:auto; }
+.player-shell.is-controls-locked .player-controls-overlay,
+.player-shell.is-controls-locked .player-big-toggle { visibility:hidden; pointer-events:none; }
 .progress-stack { display:grid; gap: 6px; }
 .progress-meta { display:flex; justify-content:space-between; gap:12px; color: var(--muted); font-size: 11px; }
 .progress-track {
@@ -1742,19 +1744,28 @@ body:has(.player-shell.is-page-fullscreen) { overflow:hidden; }
 
 /* 右下角解析/播放提示 */
 .toast-stack {
+  --toast-edge-gap: 18px;
+  --toast-close-size: 32px;
   position: fixed;
-  right: max(18px, env(safe-area-inset-right));
-  bottom: max(18px, env(safe-area-inset-bottom));
+  right: max(var(--toast-edge-gap), env(safe-area-inset-right, 0px));
+  bottom: max(var(--toast-edge-gap), env(safe-area-inset-bottom, 0px));
   z-index: 12000;
   display: grid;
+  grid-auto-rows: max-content;
   gap: 10px;
-  width: min(360px, calc(100vw - 28px));
+  width: min(360px, calc(100% - max(var(--toast-edge-gap), env(safe-area-inset-left, 0px)) - max(var(--toast-edge-gap), env(safe-area-inset-right, 0px))));
+  max-height: calc(100% - max(var(--toast-edge-gap), env(safe-area-inset-top, 0px)) - max(var(--toast-edge-gap), env(safe-area-inset-bottom, 0px)));
+  max-height: calc(100dvh - max(var(--toast-edge-gap), env(safe-area-inset-top, 0px)) - max(var(--toast-edge-gap), env(safe-area-inset-bottom, 0px)));
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   pointer-events: none;
 }
 
 .room-toast {
   display: grid;
-  grid-template-columns: 10px 1fr auto;
+  grid-template-columns: 10px minmax(0, 1fr) var(--toast-close-size);
+  min-width: 0;
   align-items: center;
   gap: 10px;
   padding: 11px 12px;
@@ -1775,23 +1786,66 @@ body:has(.player-shell.is-page-fullscreen) { overflow:hidden; }
   opacity: 1;
 }
 
+/* Fullscreen notifications must not cover the bottom interaction controls. */
+.has-page-player-fullscreen .toast-stack { top:max(12px, env(safe-area-inset-top, 0px)); bottom:auto; }
+
 .room-toast p {
+  min-width: 0;
   margin: 0;
   font-size: 12.5px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .room-toast button {
-  width: 22px;
-  height: 22px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--toast-close-size);
+  height: var(--toast-close-size);
+  min-width: var(--toast-close-size);
+  min-height: var(--toast-close-size);
+  margin: 0;
+  padding: 0;
   border: 0;
   border-radius: 50%;
+  -webkit-appearance: none;
+  appearance: none;
   background: rgba(255, 255, 255, 0.1);
   color: rgba(255, 255, 255, 0.82);
+  font-size: 0;
+  line-height: 1;
   cursor: pointer;
 }
 
+/* Center the close mark geometrically, independent of Safari's font metrics. */
+.room-toast button::before,
+.room-toast button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.room-toast button::after {
+  transform: rotate(-45deg);
+}
+
+.room-toast button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 .room-toast-dot {
+  display: block;
+  justify-self: center;
   width: 9px;
   height: 9px;
   border-radius: 50%;
@@ -1816,14 +1870,19 @@ body:has(.player-shell.is-page-fullscreen) { overflow:hidden; }
 
 @media (max-width: 640px) {
   .toast-stack {
-    right: 10px;
-    bottom: 10px;
-    width: calc(100vw - 20px);
+    --toast-edge-gap: 10px;
+    width: calc(100% - max(var(--toast-edge-gap), env(safe-area-inset-left, 0px)) - max(var(--toast-edge-gap), env(safe-area-inset-right, 0px)));
   }
 
   .room-toast {
     border-radius: 12px;
     padding: 10px 11px;
+  }
+}
+
+@media (any-pointer: coarse) {
+  .toast-stack {
+    --toast-close-size: 44px;
   }
 }
 
@@ -1872,14 +1931,14 @@ body:has(.player-shell.is-page-fullscreen) { overflow:hidden; }
   }
 }
 
-/* Player liquid glass controls and interaction-safe composer - 2026-07-17 */
+/* Clear glass controls: contrast comes from tint, not background blur. */
 .player-controls-overlay {
   border-color:rgba(255,255,255,.18);
-  border-radius:22px;
+  border-radius:12px;
   background:
-    linear-gradient(135deg, rgba(255,255,255,.10), rgba(255,255,255,.03) 42%, rgba(8,11,18,.18));
-  -webkit-backdrop-filter:blur(16px) saturate(145%);
-  backdrop-filter:blur(16px) saturate(145%);
+    linear-gradient(155deg, rgba(255,255,255,.13), rgba(255,255,255,.02) 40%), rgba(12,15,20,.66);
+  -webkit-backdrop-filter:saturate(115%);
+  backdrop-filter:saturate(115%);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.22),
     inset 0 -1px 0 rgba(255,255,255,.06),
@@ -1918,11 +1977,11 @@ body:has(.player-shell.is-page-fullscreen) { overflow:hidden; }
 
 @media (max-width: 760px) {
   .player-controls-overlay {
-    border-radius:18px;
+    border-radius:10px;
     background:
-      linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.035) 42%, rgba(8,11,18,.22));
-    -webkit-backdrop-filter:blur(14px) saturate(140%);
-    backdrop-filter:blur(14px) saturate(140%);
+      linear-gradient(155deg, rgba(255,255,255,.13), rgba(255,255,255,.02) 40%), rgba(12,15,20,.66);
+    -webkit-backdrop-filter:saturate(115%);
+    backdrop-filter:saturate(115%);
   }
 
   .fullscreen-danmaku-compose input {
@@ -2315,6 +2374,84 @@ body[data-room-access="denied"] .room-access-icon {
   .room-dialog-actions .button { flex:1 1 0; }
   .room-access-dialog .room-dialog-actions { flex-direction:column-reverse; }
   .room-access-dialog .room-dialog-actions .button { width:100%; }
+}
+
+.player-shell .player-controls-overlay .pill-button {
+  border-radius:8px;
+  border-color:transparent;
+  background:transparent;
+  box-shadow:none;
+}
+.player-shell .player-controls-overlay .pill-button:hover,
+.player-shell .player-controls-overlay .pill-button:focus-visible { background:rgba(255,255,255,.14); }
+.player-shell .player-controls-overlay .pill-button.is-active,
+.player-shell .player-controls-overlay [data-player-danmaku][data-danmaku-on="true"] { color:#7be9ff; background:rgba(98,224,255,.13); }
+.player-shell .player-controls-overlay .pill-button:disabled { opacity:.42; }
+.player-shell .interaction-toolbox { display:flex; align-items:center; justify-content:center; }
+.player-shell .interaction-toolbox svg { display:block; flex:none; margin:0; fill:none; stroke:currentColor; }
+.interaction-layer { position:absolute; pointer-events:none; overflow:hidden; z-index:5; }
+.interaction-effect { position:absolute; transform:translate(-50%,-50%); object-fit:contain; pointer-events:none; }
+.player-shell.is-interaction-placing .room-video { cursor:crosshair; }
+.player-shell.is-interaction-placing [data-player-center-play] { visibility:hidden; pointer-events:none; }
+.player-shell.has-interaction-popover .player-controls-overlay { z-index:30; }
+.interaction-popover {
+  position:fixed; inset:0; margin:auto; width:420px; max-width:calc(100% - 24px);
+  max-height:calc(100dvh - 24px); overflow:hidden; padding:20px; border-radius:8px;
+  background:rgba(24,29,35,.97); border:1px solid rgba(255,255,255,.22);
+  box-shadow:0 24px 80px rgba(0,0,0,.45),inset 0 1px rgba(255,255,255,.08); color:#f4f6f8;
+  touch-action:none; overscroll-behavior:none;
+}
+.interaction-popover::backdrop { background:rgba(0,0,0,.42); touch-action:none; }
+.interaction-group-tabs { display:flex; gap:4px; margin:0 0 14px; border-bottom:1px solid rgba(255,255,255,.12); }
+.interaction-group-tabs button { flex:1; min-height:38px; padding:8px; border:0; border-bottom:2px solid transparent; border-radius:0; background:none; color:#aeb9c4; font-size:13px; }
+.interaction-group-tabs button[aria-pressed="true"] { border-bottom-color:#7ce4ee; color:#b4f5fa; }
+.interaction-popover[hidden], .interaction-placement-cancel[hidden], .interaction-empty[hidden],
+.interaction-popover [hidden] { display:none !important; }
+.interaction-popover header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.interaction-popover header strong { font-size:17px; }
+.interaction-popover header button {
+  width:36px; height:36px; padding:0; display:flex; align-items:center; justify-content:center; flex:none;
+  border:0; border-radius:6px; background:transparent; color:inherit; cursor:pointer;
+}
+.interaction-popover header button:hover { background:rgba(255,255,255,.12); }
+.interaction-popover header svg { width:18px; height:18px; display:block; flex:none; margin:0; }
+.interaction-options { display:flex; flex-wrap:wrap; gap:20px; margin:12px 0; font-size:12px; color:#c6cbd2; }
+.interaction-options label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.interaction-options input { accent-color:#62e0ff; width:15px; height:15px; min-height:0; padding:0; margin:0; }
+.interaction-assets { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); grid-auto-rows:112px; gap:8px; min-height:232px; }
+.interaction-popover[data-active-group="builtin"] .interaction-assets { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.interaction-group-heading { display:none; }
+.interaction-asset {
+  min-width:0; padding:8px; border:1px solid rgba(255,255,255,.08); border-radius:8px;
+  background:rgba(255,255,255,.035); color:inherit; cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+}
+.interaction-asset:hover, .interaction-asset:focus-visible { border-color:#62e0ff; background:rgba(98,224,255,.10); }
+.interaction-asset img, .interaction-asset video, .interaction-asset canvas { display:block; flex:none; width:68px; height:68px; max-width:100%; object-fit:contain; }
+.interaction-asset span { font-size:12px; line-height:16px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.interaction-empty { font-size:13px; color:#b4bac3; padding:10px 0; }
+.interaction-pagination { display:flex; align-items:center; justify-content:center; gap:16px; margin-top:10px; font-size:12px; color:#bbc4cf; }
+.interaction-pagination button { width:32px; height:32px; padding:6px; border:1px solid rgba(255,255,255,.15); border-radius:6px; color:inherit; background:none; }
+.interaction-pagination svg { width:18px; height:18px; display:block; }
+.interaction-placement-cancel {
+  position:absolute; bottom:calc(100% + 8px); right:0; border:1px solid rgba(255,255,255,.25);
+  background:rgba(20,24,30,.88); color:white; border-radius:6px; padding:7px 12px; font-size:12px; cursor:pointer;
+}
+@media (max-width:760px) {
+  .player-shell .control-buttons.small { grid-template-columns:repeat(7,minmax(0,1fr)); }
+  .interaction-popover { padding:14px; }
+  .interaction-assets { grid-auto-rows:100px; min-height:208px; }
+  .interaction-asset img, .interaction-asset video, .interaction-asset canvas { width:58px; height:58px; }
+}
+@media (max-height:500px) {
+  .interaction-popover { width:460px; padding:10px 14px; }
+  .interaction-popover header { min-height:30px; }
+  .interaction-options { margin:4px 0; }
+  .interaction-group-tabs { margin-bottom:8px; }
+  .interaction-group-tabs button { min-height:30px; padding:4px; }
+  .interaction-assets { grid-auto-rows:68px; min-height:142px; gap:6px; }
+  .interaction-asset { padding:4px; gap:2px; }
+  .interaction-asset img, .interaction-asset video, .interaction-asset canvas { width:40px; height:40px; }
+  .interaction-pagination { margin-top:4px; }
 }
 
 /* Keep the fullscreen composer centered independently from status text width. */

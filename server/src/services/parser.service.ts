@@ -65,6 +65,27 @@ interface ParseContext {
   transactions: number;
   documents: number;
   textBytes: number;
+  lastProbeFailure?: ParseUpstreamError;
+}
+
+class ParseUpstreamError extends Error {
+  browserDirectCandidate?: { url: string; type: 'hls' | 'video' };
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+function upstreamStatusError(status: number): ParseUpstreamError {
+  return status === 403
+    ? new ParseUpstreamError('parse_upstream_http_403', '来源拒绝当前线路的访问，请更换可公开访问的链接；测试模式不能解除来源限制。')
+    : new ParseUpstreamError('parse_upstream_http_error', `来源暂时无法访问（HTTP ${status}），请稍后再试或更换链接。`);
+}
+
+function parseRequestError(error: Error & { code?: string }): Error {
+  if (['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET'].includes(error.code || '')) {
+    return new ParseUpstreamError('parse_upstream_socket_closed', '来源中断了当前线路的连接，请稍后再试或更换链接；测试模式不能解除来源限制。');
+  }
+  return error;
 }
 
 interface RequestOptions {
@@ -443,7 +464,12 @@ export function extractMediaPage(html: string, pageUrl: string, fallbackTitle = 
     const hlsLoadPattern = /\.loadSource\(\s*["']((?:\\.|[^"'\\])*)["']\s*\)/gi;
     for (const match of script.matchAll(hlsLoadPattern)) addCandidate(match[1] || '', 86, 'script.hls.loadSource', 'application/vnd.apple.mpegurl');
     const explicitMediaPattern = /["']((?:https?:)?\/\/[^"']+?\.(?:m3u8|mpd|mp4|webm|ogg|ogv|mov|m4v|mkv|flv)(?:\?[^"']*)?)["']/gi;
-    for (const match of script.matchAll(explicitMediaPattern)) addCandidate(match[1] || '', 72, 'script.explicit-media-url');
+    for (const match of script.matchAll(explicitMediaPattern)) {
+      // Episode navigation is not a fallback when the current media is unavailable.
+      const prefix = script.slice(0, match.index);
+      if (/\b(?:url_next|url_pre|url_prev)["']?\s*[:=]\s*$/i.test(prefix)) continue;
+      addCandidate(match[1] || '', 72, 'script.explicit-media-url');
+    }
   });
 
   const ogTitle = metaFirst('og:title').trim();
@@ -524,7 +550,7 @@ async function requestRemoteUrl(target: URL, context: ParseContext, options: Req
         callback(null, resolved.address, resolved.family);
       }) as any,
     }, resolve);
-    upstreamRequest.once('error', reject);
+    upstreamRequest.once('error', (error) => reject(parseRequestError(error)));
     upstreamRequest.end();
   });
 }
@@ -568,7 +594,7 @@ async function fetchRemoteText(rawUrl: string, context: ParseContext, referer?: 
     }
     if (status < 200 || status >= 300) {
       response.destroy();
-      throw new Error(`页面请求失败：HTTP ${status}`);
+      throw upstreamStatusError(status);
     }
 
     const contentType = String(response.headers['content-type'] || '');
@@ -619,6 +645,8 @@ async function readProbeBytes(response: IncomingMessage): Promise<Buffer> {
 
 export function classifyMediaProbe(bytes: Buffer, contentType: string, rawUrl: string): SourceType | null {
   const text = bytes.toString('utf8').replace(/^\uFEFF/, '').trimStart();
+  const mime = contentType.split(';', 1)[0].trim().toLowerCase();
+  if (/^(?:text\/html|application\/xhtml\+xml|image\/svg\+xml|(?:application|text)\/(?:[a-z0-9.+-]+\+)?json)$/.test(mime)) return null;
   const hinted = sourceTypeFromContentType(contentType);
   const guessed = guessSourceType(rawUrl);
   if ((hinted === 'hls' || guessed === 'hls') && text.startsWith('#EXTM3U')) {
@@ -636,7 +664,7 @@ export function classifyMediaProbe(bytes: Buffer, contentType: string, rawUrl: s
   const isFlv = bytes.length >= 3 && bytes.subarray(0, 3).toString('ascii') === 'FLV';
   const isMpeg = bytes.length >= 4 && bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && [0xba, 0xb3].includes(bytes[3]);
   if (isIsoBmff || isEbml || isOgg || isFlv || isMpeg) return 'video';
-  if ((hinted === 'video' || guessed === 'video') && !/^\s*(?:<!doctype|<html|<\?xml|\{)/i.test(text) && bytes.length >= 16) return 'video';
+  // A URL suffix or a video MIME alone must not verify an HTML/text error page.
   return null;
 }
 
@@ -671,7 +699,7 @@ async function probeRemoteMedia(candidate: ExtractedMediaCandidate, context: Par
             else callback(null, resolved.address, resolved.family);
           }) as any,
         }, resolve);
-        upstreamRequest.once('error', reject);
+        upstreamRequest.once('error', (error) => reject(parseRequestError(error)));
         upstreamRequest.end();
       });
 
@@ -687,14 +715,18 @@ async function probeRemoteMedia(candidate: ExtractedMediaCandidate, context: Par
       }
       if (status < 200 || status >= 300) {
         response.destroy();
-        return null;
+        throw upstreamStatusError(status);
       }
       const bytes = await readProbeBytes(response);
       const type = classifyMediaProbe(bytes, String(response.headers['content-type'] || ''), target.toString());
-      if (!type || type === 'dash') return null;
+      if (!type || type === 'dash') {
+        throw new ParseUpstreamError('parse_media_invalid', '来源返回的内容不是可播放的 MP4/M3U8 媒体，请检查链接是否失效或返回了错误页面。');
+      }
       return { ...candidate, url: target.toString(), type, score: candidate.score + 15, verified: true };
     }
     return null;
+  } catch (error) {
+    throw parseRequestError(error as Error & { code?: string });
   } finally {
     clearTimeout(probeTimeout);
     context.controller.signal.removeEventListener('abort', abortProbe);
@@ -709,6 +741,7 @@ async function selectPlayableCandidate(candidates: ExtractedMediaCandidate[], co
       const verified = await probeRemoteMedia(candidate, context);
       if (verified) return verified;
     } catch (error) {
+      if (error instanceof ParseUpstreamError) context.lastProbeFailure = error;
       if (context.controller.signal.aborted) throw new Error('视频解析超时');
       if (error instanceof Error && /超时/.test(error.message)) throw error;
       // A failed candidate is skipped; the shared deadline and transaction budget still apply.
@@ -843,13 +876,24 @@ async function parseVideoUrlUncached(inputUrl: string, fetchImpl?: typeof fetch)
         await resolvePublicAddressWithSignal(safeUrl.hostname, context.controller.signal, '视频解析超时');
         return failureResult(inputUrl, titleFromUrl(parsedUrl), inputUrl, '已识别到 DASH/MPD 地址，但当前播放器尚未支持 DASH。请改用公开的 MP4 或 M3U8 地址。');
       }
-      const verified = await probeRemoteMedia({
-        url: safeUrl.toString(),
-        type: directType,
-        score: 110,
-        evidence: 'direct-url',
-        foundOnUrl: safeUrl.toString(),
-      }, context);
+      let verified: SelectedCandidate | null;
+      await resolvePublicAddressWithSignal(safeUrl.hostname, context.controller.signal, '视频解析超时');
+      try {
+        verified = await probeRemoteMedia({
+          url: safeUrl.toString(),
+          type: directType,
+          score: 110,
+          evidence: 'direct-url',
+          foundOnUrl: safeUrl.toString(),
+        }, context);
+      } catch (error) {
+        // A public direct URL may work from the browser but not this server's
+        // network. This is a candidate, never server-side media verification.
+        if (error instanceof ParseUpstreamError) {
+          error.browserDirectCandidate = { url: safeUrl.toString(), type: directType };
+        }
+        throw error;
+      }
       if (!verified) {
         return failureResult(inputUrl, titleFromUrl(parsedUrl), inputUrl, '直接视频地址未通过状态码与媒体格式校验，请确认链接仍可匿名访问。');
       }
@@ -929,6 +973,7 @@ async function parseVideoUrlUncached(inputUrl: string, fetchImpl?: typeof fetch)
           }
           if (selected) break;
         } catch (error) {
+          if (error instanceof ParseUpstreamError) context.lastProbeFailure = error;
           if (context.controller.signal.aborted) throw new Error('视频解析超时');
           if (error instanceof Error && /超时/.test(error.message)) throw error;
           // Nested candidates are optional and remain inside the shared request budget.
@@ -937,6 +982,7 @@ async function parseVideoUrlUncached(inputUrl: string, fetchImpl?: typeof fetch)
     }
 
     if (!selected) {
+      if (context.lastProbeFailure) throw context.lastProbeFailure;
       const hasDashOnly = firstPage.candidates.some((candidate) => candidate.type === 'dash');
       const message = protectedMediaDetected
         ? '页面仅声明了受 DRM、许可证或会员访问控制保护的媒体，本项目不会尝试绕过这些限制。'
@@ -946,6 +992,9 @@ async function parseVideoUrlUncached(inputUrl: string, fetchImpl?: typeof fetch)
       return failureResult(inputUrl, firstPage.title, first.finalUrl, message);
     }
 
+    // Reuse the successful probe; room membership and exact playlist matching
+    // remain mandatory when a client later requests a proxy grant.
+    recordVerifiedDirectMediaUrl(selected.url, selected.type);
     const result: ParsedVideoSource = {
       success: true,
       inputUrl,
@@ -977,6 +1026,18 @@ export async function parseVideoUrl(rawUrl: string, options: { force?: boolean; 
   if (inFlight) return inFlight;
 
   const task = parseVideoUrlUncached(inputUrl, options.fetchImpl)
+    .catch((error) => {
+      error = parseRequestError(error);
+      if (!(error instanceof ParseUpstreamError)) throw error;
+      return {
+        ...failureResult(inputUrl, titleFromUrl(new URL(inputUrl)), inputUrl, error.message),
+        code: error.code,
+        recoverable: true,
+        retryAfterMs: 5000,
+        requiresClientParse: false,
+        ...(error.browserDirectCandidate ? { browserDirectCandidate: error.browserDirectCandidate } : {}),
+      };
+    })
     .then((result) => {
       setCachedParse(inputUrl, result);
       return result;

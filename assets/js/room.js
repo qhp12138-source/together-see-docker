@@ -79,6 +79,10 @@
 
   const ROOM_PASSWORD_KEY = "together-see:room-password:" + roomCode;
   const MEMBER_RECONNECT_TOKEN_KEY = "together-see:room-member-token:" + roomCode;
+  const SESSION_RELEASE_KEY = "together-see:departed-session:" + roomCode;
+  const SESSION_RELEASE_TTL_MS = 120000;
+  const SESSION_RELEASE_TIMEOUT_MS = 3000;
+  const SESSION_RELEASE_MAX_ATTEMPTS = 3;
   const CLIENT_ID_KEY = "together-see:client-id";
   const roomCredentialStore = window.TogetherSeeCredentials?.createRoomCredentialStore?.(roomCode) || null;
   const createdRoomNavigation = params.get("created") === "1";
@@ -224,6 +228,7 @@
     };
   }
   const sourceIntentGate = createSourceIntentGate();
+  let preparedPlaybackStart = null;
   let pendingLocalBindItem = null;
   let lastRemotePlayback = null;
   let serverTimeOffsetMs = 0;
@@ -287,8 +292,36 @@
   let joinRequestPending = false;
   let joinRequestTimeout = null;
   let joinTimeoutRetryCount = 0;
+  let pageSessionSuspended = false;
+  let sessionReleaseTask = null;
+  let memberSessionConflictSeen = false;
+  const MEMBER_SESSION_RETRY_DELAYS_MS = [300, 600, 1000, 1600, 2500, 4000];
+  const MEMBER_SESSION_WAIT_MS = 12000;
+  const memberSessionWait = { startedAt: 0, attempts: 0, timer: null, deadlineTimer: null, exhausted: false };
   let roomPassword = loadRoomPassword();
   const pendingProxyTokenRequests = new Map();
+  const roomInteractions = window.TogetherSeeInteractions?.create({
+    player,
+    getContext: function () {
+      return {
+        connected: Boolean(socket?.connected && roomAccessGranted && !pageSessionSuspended),
+        sourceId: roomState.playback?.activeSourceId || "",
+        localSourceId: player?.video?.dataset.sourceId || "",
+        now: getClientEstimatedServerTime(),
+      };
+    },
+    send: function (payload) {
+      return new Promise(function (resolve) {
+        if (!socket?.connected || !roomAccessGranted || pageSessionSuspended) return resolve({ ok: false });
+        socket.timeout(4000).emit("interaction_send", Object.assign({ roomCode }, payload), function (error, result) {
+          resolve(error ? { ok: false } : result);
+        });
+      });
+    },
+    showToast,
+  });
+  socket?.on("interaction_play", function (payload) { void roomInteractions?.show(payload); });
+  socket?.on("disconnect", function () { roomInteractions?.clear(); });
 
   function getPublicParseAuthorizationMessage(payload) {
     const messages = {
@@ -422,12 +455,15 @@
     const passwordRequired = mode === "password";
     const roomMissing = mode === "missing";
     const creatorRecoveryRequired = mode === "creator_recovery";
-    const retryable = mode === "retry";
+    const sessionConflict = mode === "session_conflict";
+    const sessionWaiting = mode === "session_wait";
+    const retryable = mode === "retry" || sessionConflict;
     if (roomAccessPasswordFields) roomAccessPasswordFields.hidden = !passwordRequired;
     if (roomAccessRecoveryFields) roomAccessRecoveryFields.hidden = !creatorRecoveryRequired;
     if (roomAccessSubmit) {
       roomAccessSubmit.hidden = !passwordRequired && !creatorRecoveryRequired && !retryable;
       roomAccessSubmit.textContent = creatorRecoveryRequired ? "恢复并进入" : (retryable ? "重新尝试" : "验证并加入");
+      if (sessionConflict) roomAccessSubmit.textContent = "重试原身份";
     }
     if (roomAccessEyebrow) {
       roomAccessEyebrow.textContent = passwordRequired ? "受保护房间" : (roomMissing ? "房间不存在" : (creatorRecoveryRequired ? "需要恢复创建者身份" : (mode === "locked" ? "房间已锁定" : (mode === "denied" ? "无法加入" : (retryable ? "连接未确认" : "正在连接")))));
@@ -437,6 +473,10 @@
     }
     if (joinPasswordMessage) {
       joinPasswordMessage.textContent = message || (passwordRequired ? "该房间需要密码才能加入。" : "正在验证房间访问状态，请稍候。");
+    }
+    if (sessionWaiting || sessionConflict) {
+      if (roomAccessEyebrow) roomAccessEyebrow.textContent = "成员连接交叠";
+      if (roomAccessTitle) roomAccessTitle.textContent = sessionWaiting ? "等待原页面断开" : "另一页面仍占用此身份";
     }
     if (joinPasswordError) joinPasswordError.textContent = invalid ? "密码不正确，请重新输入。" : "";
 
@@ -489,6 +529,8 @@
   }
 
   function grantRoomAccess() {
+    resetMemberSessionWait();
+    memberSessionConflictSeen = false;
     roomAccessGranted = true;
     joinTimeoutRetryCount = 0;
     window.clearTimeout(roomAccessRetryTimer);
@@ -586,6 +628,7 @@
   }
 
   function shouldClientParseSource(pageUrl, sourceUrl, parsed) {
+    if (parsed?.clientDirectOnly === true) return false;
     if (parsed?.bilibili) return false;
     if (parsed && parsed.requiresClientParse === true) return true;
     return isParserWrapperUrl(pageUrl) || containsKeywordUrl(sourceUrl, DEVICE_BOUND_SOURCE_KEYWORDS);
@@ -602,11 +645,11 @@
   function getPlaylistEntrySignature(item) {
     const localFile = item?.localFile || {};
     const bilibili = item?.bilibili || {};
-    return [item?.id, item?.title, item?.pageUrl, item?.refererUrl, item?.sourceUrl, item?.sourceType, item?.requiresClientParse, item?.parseMessage, item?.finalUrl, localFile.name, localFile.size, localFile.lastModified, bilibili.bvid, bilibili.cid, bilibili.page, bilibili.quality, bilibili.qualityLabel, bilibili.danmakuAvailable].join("|");
+    return [item?.id, item?.title, item?.pageUrl, item?.refererUrl, item?.sourceUrl, item?.sourceType, item?.clientDirectOnly, item?.requiresClientParse, item?.parseMessage, item?.finalUrl, localFile.name, localFile.size, localFile.lastModified, bilibili.bvid, bilibili.cid, bilibili.page, bilibili.quality, bilibili.qualityLabel, bilibili.danmakuAvailable].join("|");
   }
 
   function getPlaylistSourceIdentity(item) {
-    return [item?.id || "", item?.sourceType || "", item?.sourceUrl || item?.pageUrl || ""].join("|");
+    return [item?.id || "", item?.sourceType || "", item?.sourceUrl || item?.pageUrl || "", item?.clientDirectOnly === true].join("|");
   }
 
   function getPlaylistSignatureFromState(state) {
@@ -760,13 +803,19 @@
         reject(new Error("房间连接已断开，请重新连接后再添加"));
         return;
       }
+      const wasEmpty = !roomState.playback?.activeSourceId && !roomState.playlist?.length;
+      const socketId = socket.id;
+      let settled = false;
       const timeout = window.setTimeout(function () {
+        settled = true;
         reject(new Error("房间确认超时，请稍后重试"));
       }, 20000);
       socket.emit("playlist_add", {
         roomCode: roomCode,
         item: payload,
       }, function (state) {
+        if (settled) return;
+        settled = true;
         window.clearTimeout(timeout);
         if (state) handleRoomActionAck(state);
         const accepted = Array.isArray(state?.playlist)
@@ -774,6 +823,14 @@
         if (!accepted) {
           reject(new Error("当前成员没有添加权限，播放列表未改变"));
           return;
+        }
+        if (wasEmpty && socket?.connected && socket.id === socketId && canControlRoom()
+          && roomState.autoPlayNext === true && !preparedPlaybackStart
+          && state.playlist.length === 1 && state.playback?.activeSourceId === payload.id
+          && roomState.playback?.activeSourceId === payload.id
+          && roomState.playback?.revision === state.playback.revision) {
+          const item = getCurrentPlaylistItem();
+          if (item?.dataset.sourceId === payload.id) activatePlaylistItem(item, { prepareCurrent: true, playing: true });
         }
         resolve(state);
       });
@@ -855,9 +912,10 @@
     if (!player?.video) return;
     if (player.setExternalPlaybackRate) {
       player.setExternalPlaybackRate(rate, options);
-      return;
+    } else {
+      try { player.video.playbackRate = rate; } catch (error) {}
     }
-    try { player.video.playbackRate = rate; } catch (error) {}
+    return player.video.playbackRate;
   }
 
   function resetSyncCorrectionRate(baseRate) {
@@ -930,49 +988,18 @@
       allowAuthority: options?.allowAuthority === true,
     });
     if (message) setPlaybackStatusText(message);
-    if (snapshot.playback.playing) {
+    if (snapshot.playback.playing && snapshot.playback.buffering !== true) {
       tryStartRemotePlayback(snapshot.playback, snapshot);
     }
   }
 
-  function isRemotePlayAttemptCurrent(operation, snapshot, loadToken) {
-    if (!remotePlayOperations.isCurrent(operation)) return false;
-    if (!remotePlaybackSnapshots.isCurrent(snapshot)) return false;
-    if (loadToken && !player?.isLoadTokenCurrent?.(loadToken)) return false;
-    const latest = remotePlaybackSnapshots.current();
-    const activeSourceId = getActivePlayerSourceId();
-    return Boolean(latest?.playback?.playing
-      && (!latest.playback.activeSourceId || latest.playback.activeSourceId === activeSourceId));
-  }
-
   function tryStartRemotePlayback(playback, snapshot) {
     const currentSnapshot = snapshot || remotePlaybackSnapshots.current();
-    if (!playback?.playing || !player?.video?.src || !currentSnapshot) return;
-    const loadToken = player.getLoadToken?.() || null;
-    const operation = remotePlayOperations.begin([
-      currentSnapshot.revision,
-      playback.activeSourceId || getActivePlayerSourceId(),
-      loadToken?.generation || 0,
-    ].join("|"));
-    player.resumeBuffering?.();
-    Promise.resolve(player.video.play()).then(function () {
-      if (!isRemotePlayAttemptCurrent(operation, currentSnapshot, loadToken)) {
-        const latest = remotePlaybackSnapshots.current();
-        if (latest && !latest.playback.playing && latest.playback.activeSourceId === getActivePlayerSourceId()) {
-          player.video.pause();
-        }
-        return;
-      }
-      remotePlaybackGesturePending = false;
-      player.setSyncPlaybackPending?.(false);
-    }).catch(function () {
-      if (!isRemotePlayAttemptCurrent(operation, currentSnapshot, loadToken)) return;
-      const firstNotice = !remotePlaybackGesturePending;
-      remotePlaybackGesturePending = true;
-      player.setSyncPlaybackPending?.(true);
-      setPlaybackStatusText("点按播放器中央的播放按钮继续同步");
-      if (firstNotice) showToast("浏览器需要你点按一次播放，随后会继续跟随房主", "info", 4200);
-    });
+    if (!playback?.playing || playback.buffering === true || !player?.video?.src || !currentSnapshot) return;
+    if (!remotePlaybackSnapshots.isCurrent(currentSnapshot)) return;
+    if (playback.activeSourceId && playback.activeSourceId !== getActivePlayerSourceId()) return;
+    // The player owns one bounded play attempt per media generation, including fallback recovery.
+    return player.ensurePlaybackStarted?.();
   }
 
   function flushPendingRemotePlayback(event) {
@@ -983,6 +1010,7 @@
     const sourceId = detail.source?.id || getActivePlayerSourceId();
     const pending = remotePlaybackSnapshots.peekPending();
     if (!pending) return;
+    if (pending.snapshot.playback.buffering === true) return;
     if (isCurrentPlaybackAuthority() && !pending.allowAuthority) {
       remotePlaybackSnapshots.clearPending(pending.snapshot);
       return;
@@ -1017,12 +1045,18 @@
       ? Math.min(MAX_SYNC_PLAYBACK_RATE, hostRate + (MAX_SYNC_PLAYBACK_RATE - hostRate) * correctionProgress)
       : Math.max(MIN_SYNC_PLAYBACK_RATE, hostRate - (hostRate - MIN_SYNC_PLAYBACK_RATE) * correctionProgress);
 
-    syncCorrectionActive = true;
     lastSoftSyncAt = now;
-    setVideoPlaybackRate(nextRate, { temporary: true });
-    setPlaybackStatusText("线性追赶中 · " + nextRate.toFixed(2) + "x");
-
+    const appliedRate = setVideoPlaybackRate(nextRate, { temporary: true });
     window.clearTimeout(syncCorrectionTimer);
+    syncCorrectionTimer = null;
+    syncCorrectionActive = Math.abs(appliedRate - nextRate) < 0.001
+      && Math.abs(appliedRate - hostRate) >= 0.001;
+    if (!syncCorrectionActive) {
+      setPlaybackStatusText("暂缓进度校准 · " + appliedRate.toFixed(2) + "x");
+      return;
+    }
+    setPlaybackStatusText("线性追赶中 · " + appliedRate.toFixed(2) + "x");
+
     syncCorrectionTimer = window.setTimeout(function () {
       resetSyncCorrectionRate(hostRate);
       setPlaybackStatusText("自动同步校准中");
@@ -1031,6 +1065,7 @@
 
   function seekToHostPlayback(playback, reason, snapshot) {
     if (!playback || !player?.video || !player.video.src) return false;
+    if (playback.buffering === true) return false;
     const targetTime = predictHostTime(playback);
     if (!Number.isFinite(targetTime)) return false;
     const hostRate = getHostPlaybackRate(playback);
@@ -1140,7 +1175,9 @@
       payload.title = item.dataset.sharedSourceTitle || payload.title;
       payload.sourceUrl = item.dataset.sharedSourceUrl || payload.sourceUrl;
       payload.sourceType = item.dataset.sharedSourceType || payload.sourceType;
-      payload.requiresClientParse = item.dataset.sharedRequiresClientParse === "true";
+      payload.requiresClientParse = item.dataset.sharedClientDirectOnly !== "true" && item.dataset.sharedRequiresClientParse === "true";
+      if (item.dataset.sharedClientDirectOnly === "true") payload.clientDirectOnly = true;
+      else delete payload.clientDirectOnly;
       payload.parseMessage = item.dataset.sharedParseMessage || "";
       payload.finalUrl = item.dataset.sharedFinalUrl || "";
       payload.refererUrl = item.dataset.sharedRefererUrl || payload.pageUrl;
@@ -1334,6 +1371,10 @@
   }
 
   function scheduleFreshMemberIdentityJoin(message) {
+    if (memberSessionConflictSeen) {
+      stopMemberSessionWait("原身份尚未恢复，凭据已保留。请关闭另一页面后重试原身份；不会自动创建新成员。");
+      return false;
+    }
     if (identityFallbackAttempted) {
       revokeRoomAccess(
         "denied",
@@ -1775,7 +1816,8 @@
       refererUrl: item.dataset.refererUrl || item.dataset.pageUrl,
       sourceUrl: item.dataset.sourceUrl,
       sourceType: item.dataset.sourceType,
-      requiresClientParse: item.dataset.requiresClientParse === "true",
+      requiresClientParse: item.dataset.clientDirectOnly !== "true" && item.dataset.requiresClientParse === "true",
+      ...(item.dataset.clientDirectOnly === "true" ? { clientDirectOnly: true } : {}),
       parseMessage: item.dataset.parseMessage || "",
       finalUrl: item.dataset.finalUrl || "",
     };
@@ -1974,6 +2016,7 @@
 
   function shouldReparseForCurrentDevice(item) {
     if (!item || isPlaybackController()) return false;
+    if (item.dataset.clientDirectOnly === "true") return false;
     if (item.dataset.sourceType === "local") return false;
     if (getBilibiliMetaFromItem(item)) return false;
     if (item.dataset.requiresClientParse !== "true") return false;
@@ -2030,6 +2073,7 @@
 
   async function reparsePlaylistItemForClient(item, reason, options) {
     if (!item || !item.dataset.pageUrl) return false;
+    if (item.dataset.clientDirectOnly === "true") return false;
     const recoveryKey = getClientRecoveryKey(item);
     if (!clientParseRecovery.begin(recoveryKey)) return false;
     const previousPlayable = getPlayablePayload(item);
@@ -2053,6 +2097,8 @@
       }
       item.dataset.sourceUrl = payload.sourceUrl || item.dataset.sourceUrl;
       item.dataset.sourceType = payload.sourceType || item.dataset.sourceType;
+      item.dataset.clientDirectOnly = payload.clientDirectOnly === true ? "true" : "false";
+      if (payload.clientDirectOnly === true) item.dataset.requiresClientParse = "false";
       item.dataset.parseMessage = payload.parseMessage || item.dataset.parseMessage || "";
       item.dataset.finalUrl = payload.finalUrl || item.dataset.finalUrl || "";
       item.dataset.refererUrl = payload.refererUrl || item.dataset.refererUrl || item.dataset.pageUrl;
@@ -2112,6 +2158,92 @@
     }
   }
 
+  function cancelPreparedPlaybackStart() {
+    window.clearTimeout(preparedPlaybackStart?.timer);
+    preparedPlaybackStart = null;
+  }
+
+  function expirePreparedPlaybackStart(pending) {
+    if (preparedPlaybackStart !== pending) return;
+    cancelPreparedPlaybackStart();
+    applyRemotePlayback(roomState.playback, { allowSelf: true, forceRestore: true });
+    setPlaybackStatusText("视频准备超时，请点按播放重试");
+  }
+
+  function maybeStartPreparedPlayback(event) {
+    const pending = preparedPlaybackStart;
+    if (!pending || pending.phase !== "preparing") return;
+    if (Date.now() > pending.expiresAt) {
+      cancelPreparedPlaybackStart();
+      setPlaybackStatusText("视频准备超时，请点按播放重试");
+      return;
+    }
+    if (pending.acceptedRevision === null) return;
+    if (pending.manualPlayPending) return;
+    if (pending.playing === false) {
+      cancelPreparedPlaybackStart();
+      return;
+    }
+    const playback = roomState.playback;
+    if (Date.now() > pending.expiresAt || !socket?.connected || !roomAccessGranted
+      || !sourceIntentGate.isCurrent(pending.context) || !canControlRoom()
+      || playback?.activeSourceId !== pending.sourceId || playback?.revision !== pending.acceptedRevision
+      || !isCurrentPlaybackAuthority()) {
+      cancelPreparedPlaybackStart();
+      setPlaybackStatusText("视频准备已结束，请点按播放继续");
+      return;
+    }
+    const loadToken = player?.getLoadToken?.();
+    if (event?.detail?.generation && event.detail.generation !== loadToken?.generation) return;
+    if (getActivePlayerSourceId() !== pending.sourceId || !isMediaReadyForSync()) return;
+    pending.phase = "starting";
+    player.setDesiredPlaybackState?.(Object.assign({}, playback, { playing: true, buffering: false }));
+    Promise.resolve(player.ensurePlaybackStarted?.()).then(function (started) {
+      if (preparedPlaybackStart !== pending) return;
+      if (!started || !player.isLoadTokenCurrent?.(loadToken)
+        || Date.now() > pending.expiresAt || !socket?.connected || !roomAccessGranted
+        || roomState.playback?.revision !== pending.acceptedRevision
+        || !sourceIntentGate.isCurrent(pending.context) || !canControlRoom() || !isCurrentPlaybackAuthority()) {
+        cancelPreparedPlaybackStart();
+        applyRemotePlayback(roomState.playback, { allowSelf: true, forceRestore: true });
+        return;
+      }
+      pending.phase = "publishing";
+      const sent = emitPlaybackState({
+        force: true, userAction: true, preparedStart: true, action: "play",
+        onAck: function () { if (preparedPlaybackStart === pending) cancelPreparedPlaybackStart(); },
+      });
+      if (!sent) {
+        cancelPreparedPlaybackStart();
+        applyRemotePlayback(roomState.playback, { allowSelf: true, forceRestore: true });
+      } else {
+        window.setTimeout(function () {
+          if (preparedPlaybackStart !== pending) return;
+          cancelPreparedPlaybackStart();
+          applyRemotePlayback(roomState.playback, { allowSelf: true, forceRestore: true });
+        }, 5000);
+      }
+    });
+  }
+
+  function handlePreparedPlaybackUserIntent(event) {
+    const pending = preparedPlaybackStart;
+    const detail = event?.detail;
+    if (!pending || pending.phase !== "preparing" || detail?.action !== "play"
+      || !["pending", "failed"].includes(detail.stage)
+      || detail.sourceId !== pending.sourceId || !canControlRoom()
+      || detail.generation !== player?.getLoadToken?.()?.generation
+      || !sourceIntentGate.isCurrent(pending.context)) return;
+    pending.manualPlayPending = detail.stage === "pending";
+    pending.playing = pending.manualPlayPending;
+    if (!pending.manualPlayPending) {
+      player.setDesiredPlaybackState?.(Object.assign({}, roomState.playback || {}, {
+        activeSourceId: pending.sourceId, playing: false, buffering: false,
+      }));
+      maybeStartPreparedPlayback();
+    }
+  }
+
   function activatePlaylistItem(item, options) {
     if (!item) return;
     if (!options?.silent && !canControlRoom()) {
@@ -2131,14 +2263,28 @@
       && Boolean(player?.video?.src || player?.getLoadToken?.());
     const targetActivationPending = item.dataset.clientParseInFlight === "true";
     const sourceActuallyChanged = previousCurrent !== item || (!playerOwnsTarget && !targetActivationPending);
+    const sourceIntentChanged = sourceActuallyChanged || options?.prepareCurrent === true;
     const baseRevision = Number(roomState.playback?.revision || 0);
-    const desiredPlaying = options?.playing === true || (!options?.silent && roomState.autoPlayNext === true);
+    const requestedPlaying = typeof options?.playing === "boolean"
+      ? options.playing : (!options?.silent && roomState.autoPlayNext === true);
+    const prepareStart = !options?.silent && sourceIntentChanged && socket?.connected && requestedPlaying;
+    const desiredPlaying = prepareStart ? false : requestedPlaying;
     let requestContext = null;
 
-    if (!options?.silent && sourceActuallyChanged) {
+    if (!options?.silent && sourceIntentChanged) {
+      cancelPreparedPlaybackStart();
+      resetLocalBufferingPublishState();
       if (socket?.connected) {
         sourceIntentGate.begin(targetSourceId, baseRevision, desiredPlaying);
         requestContext = sourceIntentGate.capture(targetSourceId, baseRevision, "source");
+        {
+          const pending = {
+            context: requestContext, sourceId: targetSourceId, acceptedRevision: null,
+            phase: "preparing", playing: requestedPlaying, expiresAt: Date.now() + 60000, timer: null,
+          };
+          pending.timer = window.setTimeout(function () { expirePreparedPlaybackStart(pending); }, 60000);
+          preparedPlaybackStart = pending;
+        }
       }
       roomState.activeSourceId = targetSourceId;
       player?.setDesiredPlaybackState?.(Object.assign({}, roomState.playback || {}, {
@@ -2190,7 +2336,7 @@
 
     persistPlaylist();
     lastActiveSourceId = targetSourceId || lastActiveSourceId;
-    if (!options?.silent && sourceActuallyChanged && socket?.connected) {
+    if (!options?.silent && sourceIntentChanged && socket?.connected) {
       socket.emit("playback_update", {
         roomCode: roomCode,
         action: "source",
@@ -2202,7 +2348,20 @@
           currentTime: 0,
           duration: null,
         },
-      }, function (state) { handlePlaybackUpdateAck(state, baseRevision, requestContext); });
+      }, function (state, decision) {
+        handlePlaybackUpdateAck(state, baseRevision, requestContext);
+        const pending = preparedPlaybackStart;
+        if (!pending || pending.context !== requestContext) return;
+        if (decision?.accepted !== true || decision.action !== "source"
+          || decision.baseRevision !== baseRevision || decision.nextRevision !== baseRevision + 1
+          || state?.playback?.activeSourceId !== targetSourceId
+          || roomState.playback?.revision !== decision.nextRevision) {
+          cancelPreparedPlaybackStart();
+          return;
+        }
+        pending.acceptedRevision = decision.nextRevision;
+        maybeStartPreparedPlayback();
+      });
     }
     scheduleSidebarHeightSync();
   }
@@ -2383,6 +2542,7 @@
       refererUrl: parsed?.refererUrl || parsed?.headers?.referer || parsed?.finalUrl || parsed?.pageUrl || rawLink,
       sourceUrl: sourceUrl,
       sourceType: sourceType,
+      ...(parsed?.clientDirectOnly === true ? { clientDirectOnly: true } : {}),
       requiresClientParse: shouldClientParseSource(parsed?.pageUrl || rawLink, sourceUrl, parsed),
       parseMessage: parsed?.message || "",
       finalUrl: parsed?.finalUrl || "",
@@ -2403,6 +2563,12 @@
       });
       const parsed = await response.json().catch(function () { return null; });
       if (!parsed) throw new Error("解析接口无响应");
+      if (parsed.success === false && parsed.browserDirectCandidate && !parsed.bilibili) {
+        const verify = window.TogetherSeeDirectMedia?.verify;
+        if (typeof verify !== "function") throw new Error("本机直连验证组件未就绪");
+        const direct = await verify(parsed.browserDirectCandidate, rawLink);
+        return normalizeParsedPayload(rawLink, Object.assign({}, direct, { title: parsed.title || rawLink }));
+      }
       if (!response.ok || parsed.success === false || !parsed.src) {
         throw new Error(parsed?.message || parsed?.msg || "视频解析失败");
       }
@@ -2447,11 +2613,13 @@
     item.dataset.sourceType = sourceType;
     item.dataset.sharedSourceUrl = payload.sourceUrl || rawLink;
     item.dataset.sharedSourceType = sourceType;
-    item.dataset.sharedRequiresClientParse = payload.requiresClientParse ? "true" : "false";
+    item.dataset.sharedClientDirectOnly = payload.clientDirectOnly === true ? "true" : "false";
+    item.dataset.clientDirectOnly = item.dataset.sharedClientDirectOnly;
+    item.dataset.sharedRequiresClientParse = payload.clientDirectOnly !== true && payload.requiresClientParse ? "true" : "false";
     item.dataset.sharedParseMessage = payload.parseMessage || "";
     item.dataset.sharedFinalUrl = payload.finalUrl || "";
     item.dataset.sharedRefererUrl = payload.refererUrl || rawLink;
-    item.dataset.requiresClientParse = payload.requiresClientParse ? "true" : "false";
+    item.dataset.requiresClientParse = payload.clientDirectOnly !== true && payload.requiresClientParse ? "true" : "false";
     item.dataset.parseMessage = payload.parseMessage || "";
     item.dataset.finalUrl = payload.finalUrl || "";
     item.dataset.clientParsed = "false";
@@ -2593,6 +2761,13 @@
     const detail = event.detail || {};
     const sourceId = detail.source?.id || detail.sourceId || "";
     if (sourceId && current.dataset.sourceId !== sourceId) return;
+    if (current.dataset.clientDirectOnly === "true") {
+      setPlaylistState(current, "本机直连失败");
+      if (clientParseRecovery.markFailureNotified(getClientRecoveryKey(current))) {
+        showToast("本机直连播放失败，请更换来源；不会转服务器代理或重复解析。", "error", 5600);
+      }
+      return;
+    }
     if (getBilibiliMetaFromItem(current)) {
       requestBilibiliSourceRefresh(current, "B站播放地址可能已过期，正在安全刷新...");
       return;
@@ -2846,15 +3021,18 @@
     item.dataset.pageUrl = pageUrl;
     item.dataset.sharedSourceUrl = sourceUrl;
     item.dataset.sharedSourceType = sourceType;
-    item.dataset.sharedRequiresClientParse = payload.requiresClientParse ? "true" : "false";
+    item.dataset.sharedClientDirectOnly = payload.clientDirectOnly === true ? "true" : "false";
+    item.dataset.sharedRequiresClientParse = payload.clientDirectOnly !== true && payload.requiresClientParse ? "true" : "false";
     item.dataset.sharedParseMessage = payload.parseMessage || "";
     item.dataset.sharedFinalUrl = payload.finalUrl || "";
     item.dataset.sharedRefererUrl = refererUrl;
-    if (!clientParsed || sourceType === "local") {
+    if (!clientParsed || sourceType === "local" || payload.clientDirectOnly === true) {
       item.dataset.sourceUrl = sourceUrl;
       item.dataset.sourceType = sourceType;
+      item.dataset.clientDirectOnly = payload.clientDirectOnly === true ? "true" : "false";
+      if (payload.clientDirectOnly === true) item.dataset.clientParsed = "false";
       item.dataset.refererUrl = refererUrl;
-      item.dataset.requiresClientParse = payload.requiresClientParse ? "true" : "false";
+      item.dataset.requiresClientParse = payload.clientDirectOnly !== true && payload.requiresClientParse ? "true" : "false";
       item.dataset.parseMessage = payload.parseMessage || "";
       item.dataset.finalUrl = payload.finalUrl || "";
     }
@@ -3025,6 +3203,9 @@
     sourceIntentGate.accept(authoritativePlayback);
     lastRemotePlayback = authoritativePlayback;
     roomState.playback = authoritativePlayback;
+    if (preparedPlaybackStart && (authoritativePlayback.activeSourceId !== preparedPlaybackStart.sourceId
+      || (preparedPlaybackStart.acceptedRevision !== null
+        && authoritativePlayback.revision > preparedPlaybackStart.acceptedRevision))) cancelPreparedPlaybackStart();
     updatePlaybackAuthorityUi();
     remotePlayOperations.invalidate();
     const video = player.video;
@@ -3055,11 +3236,17 @@
       resetSyncRecoveryState();
       return;
     }
-    const playbackIntent = authoritativePlayback.buffering === true
-      ? Object.assign({}, authoritativePlayback, { playing: false })
-      : authoritativePlayback;
-    player.setDesiredPlaybackState?.(playbackIntent);
-    if (authoritativePlayback.updatedBy === myMemberId && !options?.allowSelf) return;
+    if (preparedPlaybackStart?.acceptedRevision === authoritativePlayback.revision
+      && preparedPlaybackStart.phase !== "preparing") return;
+    if (preparedPlaybackStart?.manualPlayPending && preparedPlaybackStart.playing
+      && authoritativePlayback.activeSourceId === preparedPlaybackStart.sourceId
+      && authoritativePlayback.updatedBy === myMemberId
+      && authoritativePlayback.revision === preparedPlaybackStart.context.baseRevision + 1) return;
+    player.setDesiredPlaybackState?.(authoritativePlayback);
+    if (authoritativePlayback.updatedBy === myMemberId && !options?.allowSelf) {
+      if (video.paused) tryStartRemotePlayback(authoritativePlayback, snapshot);
+      return;
+    }
 
     guardRemotePlaybackEvents();
     const hostRate = getHostPlaybackRate(authoritativePlayback);
@@ -3083,12 +3270,11 @@
     }
 
     if (authoritativePlayback.buffering === true) {
-      remotePlaybackGesturePending = false;
-      player.setSyncPlaybackPending?.(false);
-      if (!video.paused) video.pause();
       resetSyncCorrectionRate(getHostPlaybackRate(authoritativePlayback));
       remotePlaybackSnapshots.clearPending(snapshot);
-      setPlaybackStatusText("房主正在缓冲，已暂停等待");
+      // Buffering freezes the shared clock, not the user's play/pause intent.
+      if (!authoritativePlayback.playing && !video.paused) video.pause();
+      setPlaybackStatusText("控制端正在缓冲，暂缓进度校准");
       return;
     }
 
@@ -3140,6 +3326,7 @@
   }
 
   function handleAutoSyncChange(event) {
+    cancelPreparedPlaybackStart();
     const enabled = event?.detail?.enabled === true;
     remotePlayOperations.invalidate();
     remotePlaybackSnapshots.clearPending();
@@ -3174,8 +3361,7 @@
 
   function updateLocalBufferingPublishedFromAuthority() {
     const authoritativePlayback = roomState.playback;
-    localBufferingPublished = authoritativePlayback?.buffering === true
-      && authoritativePlayback?.updatedBy === myMemberId;
+    localBufferingPublished = authoritativePlayback?.buffering === true;
   }
 
   function reconcileLocalBufferingPublication() {
@@ -3208,8 +3394,7 @@
       onAck: function (state) {
         if (!localBufferingAckFlight.settle(attempt)) return;
         const authoritativePlayback = state?.playback || roomState.playback;
-        localBufferingPublished = authoritativePlayback?.buffering === true
-          && authoritativePlayback?.updatedBy === myMemberId;
+        localBufferingPublished = authoritativePlayback?.buffering === true;
         reconcileLocalBufferingPublication();
       },
     });
@@ -3219,13 +3404,14 @@
   }
 
   function handlePlayerBufferingChange(event) {
+    if (event?.detail?.generation && event.detail.generation !== player?.getLoadToken?.()?.generation) return;
     localBufferingState = event?.detail?.buffering === true;
     window.clearTimeout(localBufferingPublishTimer);
     localBufferingPublishTimer = null;
     if (localBufferingState) {
       localBufferingPublishTimer = window.setTimeout(function () {
         localBufferingPublishTimer = null;
-        if (localBufferingState && !player?.video?.paused) publishLocalBufferingState(true);
+        if (localBufferingState && !player?.video?.paused && !player?.video?.seeking) publishLocalBufferingState(true);
       }, BUFFERING_PUBLISH_DELAY_MS);
       return;
     }
@@ -3252,8 +3438,12 @@
       sourceIntentGate.accept(authoritativePlayback);
       roomState.playback = authoritativePlayback;
       lastRemotePlayback = authoritativePlayback;
-      player?.setDesiredPlaybackState?.(authoritativePlayback);
+      const preserveManualPlay = preparedPlaybackStart?.manualPlayPending
+        && preparedPlaybackStart.playing && requestContext === preparedPlaybackStart.context
+        && authoritativePlayback.activeSourceId === preparedPlaybackStart.sourceId;
+      if (!preserveManualPlay) player?.setDesiredPlaybackState?.(authoritativePlayback);
       updatePlaybackAuthorityUi();
+      if (!preserveManualPlay && player?.video?.paused) tryStartRemotePlayback(authoritativePlayback, observed.snapshot);
       return;
     }
     applyRemotePlayback(playback, {
@@ -3270,6 +3460,25 @@
     if (applyingRemotePlayback && !options?.userAction) return false;
     if (!canControlRoom()) return false;
     if (options?.periodic && !isCurrentPlaybackAuthority()) return false;
+    if (preparedPlaybackStart && !options?.preparedStart) {
+      if (!options?.userAction) return false;
+      const pending = preparedPlaybackStart;
+      if (pending.phase === "preparing" && (pending.acceptedRevision === null || pending.manualPlayPending)
+        && sourceIntentGate.isCurrent(pending.context)
+        && getCurrentPlaylistItem()?.dataset.sourceId === pending.sourceId
+        && getActivePlayerSourceId() === pending.sourceId
+        && (options.action === "play" || options.action === "pause")) {
+        // Keep the latest user intent until this source has an authoritative revision.
+        pending.manualPlayPending = false;
+        pending.playing = options.action === "play";
+        player.setDesiredPlaybackState?.(Object.assign({}, roomState.playback || {}, {
+          activeSourceId: pending.sourceId, playing: pending.playing, buffering: false,
+        }));
+        maybeStartPreparedPlayback();
+        return true;
+      }
+      cancelPreparedPlaybackStart();
+    }
     const health = getPlaybackClientHealth();
     if (options?.periodic && !health.ready) return false;
     const now = Date.now();
@@ -3292,6 +3501,7 @@
       duration: Number.isFinite(player.video.duration) ? player.video.duration : null,
       playbackRate: Number.isFinite(player.video.playbackRate) ? player.video.playbackRate : 1,
     };
+    if (options?.userAction) player.setDesiredPlaybackState?.(patch);
     remotePlayOperations.invalidate();
     socket.emit("playback_update", {
       roomCode: roomCode,
@@ -3943,8 +4153,122 @@
     }
   }
 
+  function resetMemberSessionWait() {
+    window.clearTimeout(memberSessionWait.timer);
+    window.clearTimeout(memberSessionWait.deadlineTimer);
+    Object.assign(memberSessionWait, { startedAt: 0, attempts: 0, timer: null, deadlineTimer: null, exhausted: false });
+  }
+
+  function stopMemberSessionWait(message) {
+    window.clearTimeout(memberSessionWait.timer);
+    window.clearTimeout(memberSessionWait.deadlineTimer);
+    window.clearTimeout(joinRequestTimeout);
+    window.clearTimeout(identityFallbackTimer);
+    memberSessionWait.timer = null;
+    memberSessionWait.deadlineTimer = null;
+    memberSessionWait.exhausted = true;
+    joinRequestPending = false;
+    currentJoinAttemptId = "";
+    revokeRoomAccess("session_conflict", message || "等待原连接释放已结束（最多12秒）。另一页面可能仍在线，请关闭它后重试原身份，或返回首页。成员身份和凭据已保留。", false);
+  }
+
+  function waitForMemberSessionRelease() {
+    if (pageSessionSuspended) return;
+    if (memberSessionWait.exhausted) {
+      stopMemberSessionWait();
+      return;
+    }
+    if (!memberSessionWait.startedAt) {
+      memberSessionWait.startedAt = Date.now();
+      memberSessionWait.deadlineTimer = window.setTimeout(stopMemberSessionWait, MEMBER_SESSION_WAIT_MS);
+    }
+    if (Date.now() - memberSessionWait.startedAt >= MEMBER_SESSION_WAIT_MS) {
+      stopMemberSessionWait();
+      return;
+    }
+    if (memberSessionWait.timer !== null) return;
+    const delay = MEMBER_SESSION_RETRY_DELAYS_MS[memberSessionWait.attempts];
+    if (delay === undefined) {
+      stopMemberSessionWait();
+      return;
+    }
+    memberSessionWait.attempts += 1;
+    revokeRoomAccess("session_wait", "原页面的连接仍在线，正在等待释放（" + memberSessionWait.attempts + "/6，最多12秒）。保留原成员身份与凭据。", false);
+    memberSessionWait.timer = window.setTimeout(function () {
+      memberSessionWait.timer = null;
+      if (Date.now() - memberSessionWait.startedAt >= MEMBER_SESSION_WAIT_MS) stopMemberSessionWait();
+      else joinCurrentRoom(roomPassword, { force: true, sessionRetry: true });
+    }, delay);
+  }
+
+  async function sendSessionRelease(record, keepalive) {
+    const controller = keepalive ? null : new AbortController();
+    const timer = controller ? window.setTimeout(function () { controller.abort(); }, SESSION_RELEASE_TIMEOUT_MS) : null;
+    try {
+      const response = await fetch("/api/session-release", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomCode: roomCode, memberId: record.memberId,
+          socketId: record.socketId, reconnectToken: record.reconnectToken,
+        }),
+        keepalive: keepalive === true,
+        signal: controller?.signal,
+      });
+      return { delivered: response.status === 204, retryable: response.status === 408 || response.status >= 500 };
+    } catch (error) {
+      return { delivered: false, retryable: true };
+    } finally { if (timer !== null) window.clearTimeout(timer); }
+  }
+
+  function releaseDepartedSession() {
+    if (sessionReleaseTask) return sessionReleaseTask;
+    let record;
+    let stored;
+    try {
+      stored = window.sessionStorage.getItem(SESSION_RELEASE_KEY);
+      record = JSON.parse(stored || "null");
+    } catch (error) { return Promise.resolve(); }
+    function clearMatchingTicket() {
+      try {
+        if (window.sessionStorage.getItem(SESSION_RELEASE_KEY) === stored) window.sessionStorage.removeItem(SESSION_RELEASE_KEY);
+      } catch (error) {}
+    }
+    const age = Date.now() - Number(record?.createdAt);
+    if (!record || record.memberId !== myMemberId || !record.socketId || !record.reconnectToken
+      || !Number.isFinite(age) || age < 0 || age > SESSION_RELEASE_TTL_MS) {
+      clearMatchingTicket();
+      return Promise.resolve();
+    }
+    // Only pagehide writes this short-lived ticket. Normal joins cannot evict an
+    // online page; an old socket ID/token cannot release a rotated new session.
+    sessionReleaseTask = (async function () {
+      for (let attempt = 0; attempt < SESSION_RELEASE_MAX_ATTEMPTS; attempt += 1) {
+        if (pageSessionSuspended) return;
+        if (Date.now() - Number(record.createdAt) > SESSION_RELEASE_TTL_MS) {
+          clearMatchingTicket();
+          return;
+        }
+        const result = await sendSessionRelease(record, false);
+        if (result.delivered) {
+          clearMatchingTicket();
+          return;
+        }
+        if (Date.now() - Number(record.createdAt) > SESSION_RELEASE_TTL_MS) {
+          clearMatchingTicket();
+          return;
+        }
+        if (!result.retryable || attempt === SESSION_RELEASE_MAX_ATTEMPTS - 1) return;
+        await new Promise(function (resolve) { window.setTimeout(resolve, (attempt + 1) * 300); });
+      }
+    })().finally(function () { sessionReleaseTask = null; });
+    return sessionReleaseTask;
+  }
+
   function joinCurrentRoom(passwordOverride, options) {
-    if (!socket?.connected) return false;
+    if (pageSessionSuspended || !socket?.connected || memberSessionWait.exhausted) return false;
+    if (memberSessionWait.startedAt && options?.sessionRetry !== true) return false;
     if (joinRequestPending && options?.force !== true) return false;
     if (!roomAccessGranted && !roomAdminToken) reloadPendingCreationCredentials();
     const password = passwordOverride !== undefined ? passwordOverride : roomPassword;
@@ -3957,6 +4281,10 @@
       joinRequestPending = false;
       currentJoinAttemptId = "";
       if (roomAccessGranted) return;
+      if (memberSessionWait.startedAt) {
+        waitForMemberSessionRelease();
+        return;
+      }
       if (socket?.connected && joinTimeoutRetryCount < 2) {
         joinTimeoutRetryCount += 1;
         showRoomAccessGate("checking", "暂未收到入房确认，正在重新尝试（" + joinTimeoutRetryCount + "/2）。", false);
@@ -3978,7 +4306,7 @@
       reconnectToken: roomMemberReconnectToken || "",
       attemptId: attemptId,
     }, function (state) {
-      if (currentJoinAttemptId !== attemptId) return;
+      if (pageSessionSuspended || currentJoinAttemptId !== attemptId) return;
       joinRequestPending = false;
       window.clearTimeout(joinRequestTimeout);
       if (!state?.members?.some(function (member) { return member.id === myMemberId; })) return;
@@ -3989,10 +4317,54 @@
     return true;
   }
 
+  window.addEventListener("pagehide", function () {
+    if (socket?.connected && roomAccessGranted && roomMemberReconnectToken) {
+      const record = {
+        memberId: myMemberId, socketId: socket.id,
+        reconnectToken: roomMemberReconnectToken, createdAt: Date.now(),
+      };
+      try { window.sessionStorage.setItem(SESSION_RELEASE_KEY, JSON.stringify(record)); } catch (error) {}
+      // WebSocket close frames may be lost during document teardown. A bounded
+      // keepalive POST releases only this exact authenticated old connection.
+      sendSessionRelease(record, true);
+    }
+    pageSessionSuspended = true;
+    roomAccessGranted = false;
+    currentJoinAttemptId = "";
+    joinRequestPending = false;
+    window.clearTimeout(joinRequestTimeout);
+    window.clearTimeout(identityFallbackTimer);
+    resetMemberSessionWait();
+    roomAdminAuthorized = false;
+    roomAdminAuthorizationKnown = false;
+    roomAdminIsCreator = false;
+    // Explicit namespace disconnect cancels client reconnection; credentials stay tab-scoped.
+    socket?.disconnect();
+    revokeRoomAccess("checking", "页面已离开，返回后将恢复原成员身份。", false);
+  });
+  window.addEventListener("pageshow", function () {
+    if (!pageSessionSuspended) return;
+    // Another document in this tab may have rotated the reconnect secret while
+    // this document was in BFCache. Never rejoin with its stale in-memory token.
+    try {
+      if (window.sessionStorage.getItem("together-see:member-id") === myMemberId) {
+        const currentToken = window.sessionStorage.getItem(MEMBER_RECONNECT_TOKEN_KEY);
+        if (currentToken) roomMemberReconnectToken = currentToken;
+      }
+    } catch (error) {}
+    pageSessionSuspended = false;
+    needsAuthoritativePlaybackRestore = true;
+    showRoomAccessGate("checking", "正在恢复原成员身份，请稍候。", false);
+    if (socket?.connected) joinCurrentRoom();
+    else socket?.connect();
+  });
+
   window.addEventListener("together-see:player-ready-for-sync", flushPendingRemotePlayback);
+  window.addEventListener("together-see:player-ready-for-sync", maybeStartPreparedPlayback);
   window.addEventListener("together-see:player-buffering-change", handlePlayerBufferingChange);
   window.addEventListener("together-see:manual-sync", handleManualSyncRequest);
   window.addEventListener("together-see:auto-sync-change", handleAutoSyncChange);
+  window.addEventListener("together-see:playback-user-intent", handlePreparedPlaybackUserIntent);
   window.addEventListener("together-see:playback-user-action", function (event) {
     const action = ["play", "pause", "seek", "rate"].includes(event?.detail?.action)
       ? event.detail.action
@@ -4036,7 +4408,7 @@
   document.querySelectorAll("[data-room-confirm-cancel]").forEach(function (node) {
     node.addEventListener("click", function () { closeRoomConfirmation(false); });
   });
-  joinPasswordForm?.addEventListener("submit", function (event) {
+  joinPasswordForm?.addEventListener("submit", async function (event) {
     event.preventDefault();
     if (document.body.dataset.roomAccess === "creator_recovery") {
       recoverRoomAdmin(roomAccessRecoveryInput?.value || roomAdminRecoveryCode, {
@@ -4045,9 +4417,13 @@
       });
       return;
     }
-    if (document.body.dataset.roomAccess === "retry") {
+    if (document.body.dataset.roomAccess === "retry" || document.body.dataset.roomAccess === "session_conflict") {
+      resetMemberSessionWait();
       joinTimeoutRetryCount = 0;
       showRoomAccessGate("checking", "正在重新验证房间访问状态，请稍候。", false);
+      const connectedSocketId = socket?.id;
+      await releaseDepartedSession();
+      if (pageSessionSuspended || !socket?.connected || socket.id !== connectedSocketId) return;
       joinCurrentRoom(roomPassword, { force: true });
       return;
     }
@@ -4077,7 +4453,14 @@
   });
 
   if (socket) {
-    socket.on("connect", function () {
+    socket.on("connect", async function () {
+      if (pageSessionSuspended) {
+        socket.disconnect();
+        return;
+      }
+      const connectedSocketId = socket.id;
+      await releaseDepartedSession();
+      if (pageSessionSuspended || !socket.connected || socket.id !== connectedSocketId) return;
       sourceIntentGate.reset();
       resetLocalBufferingPublishState();
       joinRequestPending = false;
@@ -4085,6 +4468,14 @@
       joinTimeoutRetryCount = 0;
       automaticAdminRecoveryAttempted = false;
       identityFallbackAttempted = false;
+      if (memberSessionWait.exhausted) {
+        stopMemberSessionWait();
+        return;
+      }
+      if (memberSessionWait.startedAt) {
+        waitForMemberSessionRelease();
+        return;
+      }
       if (!roomAccessGranted) showRoomAccessGate("checking", "正在验证房间访问状态，请稍候。", false);
       else updateConnectionStatus("已连接", true);
       measureServerClockOffset();
@@ -4097,6 +4488,7 @@
     });
 
     socket.on("room_permissions", function (payload) {
+      if (pageSessionSuspended) return;
       if (!payload || payload.roomCode !== roomCode || payload.memberId !== myMemberId) return;
       roomAdminAuthorizationKnown = true;
       roomAdminAuthorized = payload.canManage === true;
@@ -4115,6 +4507,7 @@
     });
 
     socket.on("room_admin_token", function (payload) {
+      if (pageSessionSuspended) return;
       if (!payload || payload.roomCode !== roomCode || !payload.adminToken) return;
       if (!roomAccessGranted && payload.recoveryCode) {
         try { roomCredentialStore?.stageCreated(payload.adminToken, payload.recoveryCode); } catch (error) {}
@@ -4131,6 +4524,7 @@
       if (payload.delegated) {
         showToast("原管理员持续离线，你已接管房间管理", "success", 4200);
       } else if (payload.recovered) {
+        resetMemberSessionWait();
         showToast("管理身份已恢复，正在重新加入房间", "success", 2800);
         window.setTimeout(function () { joinCurrentRoom(roomPassword, { force: true }); }, 120);
       } else {
@@ -4139,6 +4533,7 @@
     });
 
     socket.on("room_state", function (state) {
+      if (pageSessionSuspended) return;
       if (!state?.members?.some(function (member) { return member.id === myMemberId; })) return;
       grantRoomAccess();
       applyRemoteRoomState(state);
@@ -4157,6 +4552,7 @@
       player?.showDanmaku?.(message);
     });
     socket.on("room_error", function (payload) {
+      if (pageSessionSuspended) return;
       if (payload?.attemptId && payload.attemptId !== currentJoinAttemptId) return;
       if (payload?.attemptId) {
         joinRequestPending = false;
@@ -4165,6 +4561,15 @@
         currentJoinAttemptId = "";
       }
       if (roomAccessGranted && payload?.state) applyRemoteRoomState(payload.state);
+      if (payload?.code === "member_online_elsewhere") {
+        memberSessionConflictSeen = true;
+        waitForMemberSessionRelease();
+        return;
+      }
+      if (memberSessionConflictSeen && ["admin_member_mismatch", "reconnect_token_invalid", "member_identity_invalid"].includes(payload?.code)) {
+        stopMemberSessionWait("原成员凭据暂时无法确认，未自动清除。请关闭另一页面后重试，或返回首页使用原恢复码恢复管理身份。");
+        return;
+      }
       if (payload?.code === "admin_member_mismatch"
         || (payload?.code === "member_identity_invalid" && roomAdminToken)) {
         if (maybeRecoverStoredAdmin({
@@ -4191,7 +4596,6 @@
         return;
       }
       if (payload?.code === "reconnect_token_invalid"
-        || payload?.code === "member_online_elsewhere"
         || payload?.code === "member_identity_invalid") {
         scheduleFreshMemberIdentityJoin("成员凭据已失效，正在申请新的房间身份。");
         return;
@@ -4298,19 +4702,28 @@
       roomAdminRecoveryForm?.querySelectorAll("input, button").forEach(function (node) { node.disabled = true; });
     });
     socket.on("connect_error", function () {
+      if (pageSessionSuspended) return;
+      if (memberSessionWait.exhausted) {
+        stopMemberSessionWait();
+        return;
+      }
       updateConnectionStatus("连接重试中", false);
-      if (!roomAccessGranted) showRoomAccessGate("checking", "房间服务连接异常，正在自动重试。", false);
+      if (!roomAccessGranted && !memberSessionWait.startedAt) showRoomAccessGate("checking", "房间服务连接异常，正在自动重试。", false);
     });
     socket.on("disconnect", function (reason) {
+      cancelPreparedPlaybackStart();
       sourceIntentGate.reset();
       resetLocalBufferingPublishState();
+      if (pageSessionSuspended) return;
       if (document.body.dataset.roomKicked === "true") return;
       needsAuthoritativePlaybackRestore = true;
       remotePlaybackSnapshots.clear();
       remotePlayOperations.invalidate();
       updateConnectionStatus("重新连接中", false);
       if (reason === "io server disconnect") {
-        window.setTimeout(function () { socket.connect(); }, 800);
+        window.setTimeout(function () {
+          if (!pageSessionSuspended && document.body.dataset.roomKicked !== "true") socket.connect();
+        }, 800);
       }
     });
 
@@ -4327,6 +4740,15 @@
   if (player?.video) {
     window.setInterval(function () {
       updatePlaybackAuthorityUi();
+      maybeStartPreparedPlayback();
+      if (preparedPlaybackStart) return;
+      if (roomAccessGranted && socket?.connected && isCurrentPlaybackAuthority()) {
+        updateLocalBufferingPublishedFromAuthority();
+        reconcileLocalBufferingPublication();
+        if (player.video.paused && player.getAutoSyncEnabled?.() !== false) {
+          tryStartRemotePlayback(roomState.playback);
+        }
+      }
       if (player.video && !player.video.paused && isCurrentPlaybackAuthority()) {
         emitPlaybackState({ force: true, periodic: true, action: "periodic" });
       }

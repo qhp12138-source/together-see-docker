@@ -125,6 +125,8 @@ function normalizePlaylist(value: unknown): PlaylistItem[] {
     const localSourceUrl = sourceType === 'local' ? createLocalPlaceholderUrl(localFile!) : '';
     const pageUrl = localSourceUrl || (isString(item.pageUrl) ? item.pageUrl : '');
     const sourceUrl = localSourceUrl || (isString(item.sourceUrl) ? item.sourceUrl : '');
+    const clientDirectOnly = item.clientDirectOnly === true && !isBilibiliPageUrl(pageUrl)
+      && (sourceType === 'video' || sourceType === 'hls') && pageUrl === sourceUrl;
     return {
       id: isString(item.id) ? item.id : '',
       title,
@@ -134,7 +136,8 @@ function normalizePlaylist(value: unknown): PlaylistItem[] {
       createdAt: isNumber(item.createdAt) ? item.createdAt : Date.now(),
       addedBy: typeof item.addedBy === 'string' ? item.addedBy : undefined,
       localFile,
-      requiresClientParse: item.requiresClientParse === true,
+      clientDirectOnly,
+      requiresClientParse: clientDirectOnly ? false : item.requiresClientParse === true,
       parseMessage: typeof item.parseMessage === 'string' ? item.parseMessage : '',
       finalUrl: sourceType === 'local' ? '' : (typeof item.finalUrl === 'string' ? item.finalUrl : ''),
       refererUrl: sourceType === 'local' ? '' : (typeof item.refererUrl === 'string' ? item.refererUrl : pageUrl),

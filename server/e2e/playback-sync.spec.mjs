@@ -91,7 +91,8 @@ test('desktop host and mobile guest keep playback stable across playlist and syn
       });
       video.dispatchEvent(new Event('waiting'));
     });
-    await expect.poll(async () => (await readMediaState(guestPage)).paused, { timeout: 3000 }).toBe(true);
+    await hostPage.waitForTimeout(1200);
+    expect((await readMediaState(guestPage)).paused).toBe(false);
     await hostPage.locator('[data-room-video]').evaluate((video) => {
       delete video.readyState;
       delete video.buffered;

@@ -1,13 +1,63 @@
 import { Router } from 'express';
-import { env } from '../config/env.js';
+import { env, isPublicOriginAllowed } from '../config/env.js';
 import { roomService } from '../services/room.service.js';
 import { getTrustedClientAddress } from '../utils/client-address.js';
 import { normalizeRoomCode } from '../utils/id.js';
 import { BoundedSlidingWindowRateLimiter } from '../utils/rate-limit.js';
+import { logStructuredEvent } from '../utils/structured-log.js';
 
 export const roomRouter = Router();
 const ROOM_CREATE_RATE_WINDOW_MS = 60_000;
 const roomCreateRateLimiter = new BoundedSlidingWindowRateLimiter();
+const sessionReleaseRateLimiter = new BoundedSlidingWindowRateLimiter();
+
+export interface SessionReleaseRequest {
+  roomCode: string;
+  memberId: string;
+  socketId: string;
+  reconnectToken: string;
+}
+
+export type SessionReleaseHandler = (request: SessionReleaseRequest) => boolean;
+
+roomRouter.post('/session-release', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const origin = req.get('origin');
+  let allowedOrigin = false;
+  try {
+    const parsed = new URL(origin || '');
+    allowedOrigin = ['http:', 'https:'].includes(parsed.protocol) && parsed.origin === origin
+      && isPublicOriginAllowed(origin)
+      && (!env.publicOrigins.includes('*') || parsed.origin === new URL(`${req.protocol}://${req.get('host')}`).origin);
+  } catch {}
+  if (!allowedOrigin) {
+    res.status(403).json({ success: false, code: 'session_release_origin_denied' });
+    return;
+  }
+  if (!sessionReleaseRateLimiter.allow(getTrustedClientAddress(req), 60, 60_000)) {
+    res.setHeader('Retry-After', '60');
+    res.status(429).json({ success: false, code: 'session_release_rate_limited' });
+    return;
+  }
+  const { roomCode, memberId, socketId, reconnectToken } = req.body || {};
+  if (typeof roomCode !== 'string' || !roomCode.trim() || roomCode.length > 80
+    || typeof memberId !== 'string' || !memberId || memberId.length > 80
+    || typeof socketId !== 'string' || !socketId || socketId.length > 120
+    || typeof reconnectToken !== 'string' || !/^[A-Za-z0-9_-]{32,120}$/.test(reconnectToken)) {
+    res.status(400).json({ success: false, code: 'session_release_invalid' });
+    return;
+  }
+  const release = req.app.locals.releaseRoomSession as SessionReleaseHandler | undefined;
+  if (typeof release !== 'function') {
+    res.status(503).json({ success: false, code: 'session_release_unavailable' });
+    return;
+  }
+  // Identical responses for stale, invalid and accepted credentials avoid a session oracle.
+  const applied = release({ roomCode: normalizeRoomCode(roomCode), memberId, socketId, reconnectToken });
+  const decision = applied ? 'applied' : 'noop';
+  logStructuredEvent('session_release_decision', { decision }, { suppressKey: `session-release:${decision}` });
+  res.status(204).end();
+});
 
 function allowRoomCreation(key: string): boolean {
   return roomCreateRateLimiter.allow(key, env.roomCreateRateLimitPerMinute, ROOM_CREATE_RATE_WINDOW_MS);

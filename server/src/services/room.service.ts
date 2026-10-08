@@ -745,6 +745,13 @@ export class RoomService {
     return null;
   }
 
+  canReleaseMemberSession(roomCode: string, memberId: string, socketId: string, reconnectToken: string): boolean {
+    const room = rooms.get(normalizeRoomCode(roomCode));
+    if (!room || room.members.get(memberId)?.socketId !== socketId) return false;
+    const reconnectHash = room.memberReconnectHashes.get(memberId);
+    return Boolean(reconnectHash && reconnectToken && safeEqualHash(reconnectHash, hashSecret(reconnectToken)));
+  }
+
   isRecognizedReconnect(roomCode: string, memberId: string, reconnectToken?: string, socketId?: string, now = Date.now()): boolean {
     const room = rooms.get(normalizeRoomCode(roomCode));
     if (!room) return false;
@@ -1094,6 +1101,9 @@ export class RoomService {
       }
     }
     const localSourceUrl = item.sourceType === 'local' ? createLocalPlaceholderUrl(item.localFile!) : '';
+    const clientDirectOnly = item.clientDirectOnly === true && !isBilibiliPageUrl(item.pageUrl)
+      && (item.sourceType === 'video' || item.sourceType === 'hls')
+      && item.pageUrl === item.sourceUrl;
     const nextItem: PlaylistItem = {
       id: item.id || createId('video'),
       title: item.title || item.pageUrl || item.sourceUrl || '未命名视频',
@@ -1103,7 +1113,8 @@ export class RoomService {
       createdAt: item.createdAt || Date.now(),
       addedBy: item.addedBy,
       localFile: item.localFile || null,
-      requiresClientParse: Boolean(item.requiresClientParse),
+      clientDirectOnly,
+      requiresClientParse: clientDirectOnly ? false : Boolean(item.requiresClientParse),
       parseMessage: item.parseMessage || '',
       finalUrl: item.sourceType === 'local' ? '' : (item.finalUrl || ''),
       refererUrl: item.sourceType === 'local' ? '' : (item.refererUrl || item.pageUrl || item.sourceUrl),
@@ -1112,16 +1123,23 @@ export class RoomService {
         : undefined,
     };
 
-    const previousActiveSourceId = room.playback.activeSourceId;
+    const previousPlayback = room.playback;
     const previousUpdatedAt = room.updatedAt;
     room.playlist.push(nextItem);
-    if (!room.playback.activeSourceId) room.playback.activeSourceId = nextItem.id;
+    if (!room.playback.activeSourceId) {
+      room.playback = {
+        ...room.playback,
+        activeSourceId: nextItem.id,
+        revision: playbackRevision(room.playback) + 1,
+        updatedAt: Date.now(),
+      };
+    }
     touch(room);
     try {
       assertRoomFitsStore(room);
     } catch (error) {
       room.playlist.pop();
-      room.playback.activeSourceId = previousActiveSourceId;
+      room.playback = previousPlayback;
       room.updatedAt = previousUpdatedAt;
       throw error;
     }

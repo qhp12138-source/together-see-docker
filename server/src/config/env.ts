@@ -71,7 +71,7 @@ const roomStoreMaxRoomBytes = boundedIntFromEnv(
 );
 const roomStoreMaxRooms = boundedIntFromEnv('ROOM_STORE_MAX_ROOMS', 500, 20, 2000);
 const roomMaxActiveByStore = Math.max(1, Math.floor((roomStoreMaxBytes - 4096) / (roomStoreMaxRoomBytes + 2)));
-const roomMaxMembers = boundedIntFromEnv('ROOM_MAX_MEMBERS', 20, 1, 100);
+const roomMaxMembers = boundedIntFromEnv('ROOM_MAX_MEMBERS', 100, 1, 100);
 
 export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',

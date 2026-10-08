@@ -2,21 +2,29 @@
 
 支持 Docker 自部署的多人同步观影项目。将你有权使用的视频链接加入房间，与朋友同步播放、聊天和发送弹幕。
 
-**当前版本：0.2.0-beta.31，公开测试阶段，不是 1.0 稳定版。** 本仓库包含完整源码、Docker 配置、测试与开发进度，从独立代码快照开始，不包含私有开发历史和运维资料。
+**运行版本：1.3.1；公开快照候选日期：2026-10-08。** 本候选测试结果待补充；版本号不代表已完成公开发布、真机验收或生产部署。公开仓库不包含私人开发历史或运维资料。
+
+1.3.1 保持 1.3 系列正常功能范围，仅增加依赖安全修复：`proxy-addr` 从 2.0.7 升至 2.0.8，对应 Critical 公告 [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h)（2026-10-05 收录于 GitHub Advisory Database）。修复后的完整测试和依赖审计仍待最终候选确认，不表示已部署。
 
 ## 功能
 
-- 创建/加入房间、密码、锁房、昵称修改、房主管理与全员播放控制。
-- 共享播放列表、播放/暂停/进度/倍速同步、房间自动连播设置。
-- 聊天与站内弹幕；Bilibili 匿名公开视频、分P与原弹幕。
-- 公网 MP4/HLS 直链验证、有限公开网页媒体声明提取，不执行网页脚本。
-- 浏览器优先直连，失败时使用有界、房间成员绑定的媒体代理。
-- 本地文件同步：各端自行选择相同文件，只同步控制状态，不上传、不推流、不使用 P2P 分发。
-- JSON 持久化；默认空房 2 小时清理，最多 20 个活动房间、每房 20 人。
+- 创建/加入房间、密码、锁房、昵称、权限恢复及房主/全员播放控制。
+- 共享列表、播放/暂停/进度/倍速同步、自动连播；准备与缓冲状态协调、有界恢复和旧源事件隔离。
+- 聊天、站内弹幕、Bilibili 匿名公开视频与原弹幕。
+- 公网 MP4/HLS 直链验证、有限公开网页静态媒体提取及房间成员绑定的媒体代理。
+- 本地文件同步：各端选择相同文件，只同步控制，不上传或分发文件。
+- 短时互动：四个 Canvas 预设 `heart`、`fireworks`、`sakura`、`birthday` 和 `question` 精灵；本机可关闭效果或音效。
+- JSON 持久化；默认空房 2 小时清理、最多 20 个活动房间、每房最多 100 人。容量上限不等于性能承诺。
+
+## 媒体与安全边界
+
+公网纯媒体直链不要求事先登记域名白名单，但必须通过有限媒体探测和公网安全校验。代理授权还要求有效成员会话，以及 URL、查询参数和媒体类型精确匹配当前房间列表；验证缓存不是房间授权，不能跨房复用。
+
+网页提取不享受纯媒体直链的免域名预登记规则：仅处理匿名静态声明，可信嵌套页面与候选媒体代理继续受现有信任/白名单策略约束。不能把网页地址当成任意主机代理入口。不执行网页脚本，不绕过登录、会员、付费、验证码或 DRM；公开版不提供绕过模式或特殊访问密钥。
 
 ## Docker 快速开始
 
-需要 Docker Engine 与 Docker Compose。正式部署使用 HTTPS 反向代理。
+需要 Docker Engine 与 Docker Compose。正式使用应部署同源 HTTPS 反向代理。
 
 ```bash
 git clone https://github.com/qhp12138-source/together-see-docker.git
@@ -24,46 +32,39 @@ cd together-see-docker
 cp .env.example .env
 ```
 
-编辑 `.env`：本机体验设为 `PUBLIC_ORIGIN=http://localhost:8080`；正式部署填写实际 HTTPS 来源，例如 `https://see.example.com`。默认端口仅绑定回环地址，不能直接从其他设备访问。
+本机体验将 `.env` 中 `PUBLIC_ORIGIN` 改为 `http://localhost:8080`；正式部署填入运营者自己的 HTTPS 来源。默认只绑定回环地址，不直接开放给其他设备。
 
 ```bash
 docker compose up -d --build
-curl http://localhost:8080/api/health
+curl -fsS http://localhost:8080/api/health
 ```
 
-本机打开 `http://localhost:8080/`。不要把正式来源改为 `*`，也不要为了兼容媒体关闭 SSRF 或房间授权检查。完整域名、可信代理、Range 和更新流程见 [部署文档](部署文档.md)。
+本机打开 `http://localhost:8080/`。部署前阅读 [部署文档](部署文档.md)，不要把正式来源设为 `*` 或关闭 SSRF、房间授权检查。
 
 ## 开发与验证
 
-前端为 HTML/CSS/JavaScript；后端为 Node.js、TypeScript、Express 和 Socket.IO；HLS 使用 hls.js。建议使用与 Dockerfile 相同的 Node.js 24 版本。
+前端为 HTML/CSS/JavaScript，后端为 Node.js、TypeScript、Express 和 Socket.IO；HLS 使用 hls.js。使用与 Dockerfile 一致的 Node.js 24。
 
 ```bash
 cd server
 npm ci
 npm run verify:release
 npx playwright install chromium
-npm run verify:1.0
 npm run verify:1.0:full
 ```
 
-Windows 可使用 `npm.cmd`/`npx.cmd`。后端 `npm run dev` 仅启动 API/Socket，不提供完整静态站点。仓库默认使用 npm 镜像源，安装/审计可指定 `--registry=https://registry.npmjs.org`。完整长播至少 30 分钟，短冒烟不能替代。
+Windows 可使用 `npm.cmd`/`npx.cmd`。`npm run dev` 只启动 API/Socket，不提供完整静态站点。以上是复验步骤，不是本候选已通过的结果；历史命名的 `verify:1.0:full` 仍用于完整验收。
 
-## 已知限制
+## 限制与文档
 
-- 面向单实例、匿名小范围使用，没有账号、Redis 多实例或上传转码。
-- 第三方接口、CDN、跨域和自动播放策略可能变化，不保证所有链接或清晰度可用。
-- 不支持登录、会员、付费、验证码或 DRM 绕过。
-- 自动化移动视口不是 Android/iOS 真机验收。真实设备、弱网及第三方长播仍是 1.0 前重点。
+单实例匿名使用，不含账号、多实例、上传转码或 P2P 分发。第三方接口、跨域和自动播放策略可能变化，不保证所有媒体可播放。移动视口测试不能替代真机及至少 30 分钟双端长播。
 
-## 文档
-
-- [开发进度](PROJECT_PROGRESS.md) / [1.0 验收范围](1.0_ACCEPTANCE.md)
-- [Android 测试模板](ANDROID_1.0_TEST_RECORD.md) / [故障排查](DEPLOYMENT_AND_TROUBLESHOOTING.md)
+- [部署](部署文档.md) / [排障](DEPLOYMENT_AND_TROUBLESHOOTING.md) / [后端](server/README.md)
+- [互动素材](INTERACTION_ASSETS.md) / [公开进度](PROJECT_PROGRESS.md)
+- [验收清单](1.0_ACCEPTANCE.md) / [Android 记录模板](ANDROID_1.0_TEST_RECORD.md)
 - [贡献指南](CONTRIBUTING.md) / [安全报告](SECURITY.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md) / [SBOM](SBOM.cdx.json)
 
-## 许可与使用边界
+## 许可
 
-项目代码按 [MIT](LICENSE) 开源，第三方组件保留各自许可证。仅供学习交流与技术研究，不内置视频资源。只使用有权访问和传播的内容，并遵守第三方规则；用途声明不替代实际运营者的版权、隐私和内容治理责任。
-
-学习研究是项目定位，不构成对 MIT 许可证另加的用途限制。
+项目代码按 [MIT](LICENSE) 开源，第三方组件保留各自许可证。不内置影视资源；仅使用有权访问和传播的内容，并遵守平台规则。学习研究定位不构成对 MIT 另加用途限制，也不替代运营者的版权、隐私和内容治理责任。

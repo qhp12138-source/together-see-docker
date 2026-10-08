@@ -52,6 +52,9 @@ assert.match(serverEnvExample, /^ROOM_HOST_RECONNECT_GRACE_MS=60000$/m, 'server 
 assert.match(composeFile, /ROOM_HOST_RECONNECT_GRACE_MS: "\$\{ROOM_HOST_RECONNECT_GRACE_MS:-60000\}"/, 'Compose should default the host reconnect grace to 60 seconds');
 assert.doesNotMatch(webDockerfile, /COPY[^\n]*(?:README\.md|PROJECT_PROGRESS\.md|部署文档\.md|DEPLOYMENT_AND_TROUBLESHOOTING\.md)/, 'the public web image must not publish internal project or deployment documents');
 assert.match(composeFile, /stop_grace_period:\s*70s/, 'Compose should outlast the maximum 60 second room-store shutdown timeout');
+assert.match(composeFile, /INTERACTION_ASSET_DIR: \/app\/interactions/, 'server must read the shared maintainer interaction catalog');
+assert.match(composeFile, /\.\/assets\/interactions:\/app\/interactions:ro/, 'interaction assets must be read-only for the server');
+assert.match(composeFile, /\.\/assets\/interactions:\/usr\/share\/nginx\/html\/assets\/interactions:ro/, 'web and server must use the same read-only interaction directory');
 assert.match(
   nginxConfig,
   /log_format together_see_proxy[^;]*\$request_method \$uri \$server_protocol[^;]*;/s,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import vm from 'node:vm';
 
 process.env.ROOM_STORE_FILE = process.env.VERIFY_ROOM_FLOW_STORE_FILE || `data/verify-room-flow-${Date.now()}.json`;
 process.env.ROOM_STORE_WRITE_DELAY_MS = '10';
@@ -45,6 +46,7 @@ fs.writeFileSync(process.env.ROOM_STORE_FILE, JSON.stringify({
 
 const { flushRoomPersistence, roomService } = await import('../dist/services/room.service.js');
 const { sanitizePlaylistItem } = await import('../dist/sockets/index.js');
+const { env } = await import('../dist/config/env.js');
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -115,6 +117,67 @@ assert.equal(
   false,
   'the initial creator binding must not be recorded as a host reclaim',
 );
+
+const activationItem = {
+  id: 'activation-fixture', title: 'Activation fixture', sourceType: 'video',
+  pageUrl: 'https://example.com/activation.mp4', sourceUrl: 'https://example.com/activation.mp4',
+};
+const recoveryContext = vm.createContext({});
+vm.runInContext(fs.readFileSync(new URL('../../assets/js/recovery.js', import.meta.url), 'utf8'), recoveryContext);
+const activationQueue = recoveryContext.TogetherSeeRecovery.createPlaybackSnapshotQueue();
+assert.equal(guardedState.playback.revision, 0, 'the first activation regression must begin at revision zero');
+assert.equal(guardedState.playback.activeSourceId, null);
+activationQueue.observe(guardedState.playback);
+
+function addFirstItemAtNextTimestamp(before) {
+  const originalNow = Date.now;
+  const activatedAt = Math.max(originalNow(), before.playback.updatedAt + 1);
+  let after;
+  try {
+    Date.now = () => activatedAt;
+    after = roomService.addPlaylistItem(guardedRoomCode, activationItem);
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.deepEqual(after.playback, {
+    ...before.playback, activeSourceId: activationItem.id,
+    revision: before.playback.revision + 1, updatedAt: activatedAt,
+  }, 'automatic activation must change only source, revision and timestamp, preserving authority and lease');
+  return after;
+}
+
+const firstActivation = addFirstItemAtNextTimestamp(guardedState);
+assert.equal(activationQueue.observe(firstActivation.playback).accepted, true, 'first activation must supersede the empty snapshot');
+const rejectedPeriodic = roomService.updatePlaybackWithDecision(guardedRoomCode, {
+  activeSourceId: activationItem.id, playing: true, currentTime: 1,
+}, { action: 'periodic', memberId: 'guarded-host', baseRevision: firstActivation.playback.revision, clientReady: true });
+assert.equal(rejectedPeriodic.accepted, false);
+assert.equal(rejectedPeriodic.reason, 'room_not_playing');
+assert.deepEqual(rejectedPeriodic.state.playback, firstActivation.playback, 'a rejected periodic ACK must preserve the authoritative activation');
+const ackObservation = activationQueue.observe(rejectedPeriodic.state.playback);
+assert.equal(ackObservation.accepted, false);
+assert.equal(ackObservation.duplicate, true);
+assert.equal(activationQueue.current().playback.activeSourceId, activationItem.id, 'forceRestore fallback must retain the new source');
+assert.equal(activationQueue.observe(guardedState.playback).accepted, false, 'a late empty snapshot must remain stale');
+assert.equal(activationQueue.observe({ ...firstActivation.playback, activeSourceId: null }).accepted, false, 'same-revision conflicts must remain rejected');
+assert.equal(activationQueue.current().playback.activeSourceId, activationItem.id);
+
+const secondActivationItem = roomService.addPlaylistItem(guardedRoomCode, { ...activationItem, id: 'inactive-fixture' });
+assert.deepEqual(secondActivationItem.playback, firstActivation.playback, 'adding a non-active item must not change playback');
+roomService.deletePlaylistItem(guardedRoomCode, 'inactive-fixture');
+roomService.deletePlaylistItem(guardedRoomCode, activationItem.id);
+roomService.setControlPolicy(guardedRoomCode, 'everyone', { memberId: 'guarded-host' });
+const leasedEmpty = roomService.updatePlayback(guardedRoomCode, { playing: false, currentTime: 12, playbackRate: 1.25, updatedBy: 'guarded-host' });
+assert.equal(leasedEmpty.playback.activeSourceId, null);
+assert.ok(leasedEmpty.playback.controlLeaseUntil > Date.now(), 'rollback and activation must exercise an existing lease');
+assert.throws(() => roomService.addPlaylistItem(guardedRoomCode, {
+  ...activationItem, title: 'x'.repeat(env.roomStoreMaxRoomBytes + 1),
+}), /容量上限/, 'oversized first activation must fail admission');
+const rolledBackActivation = roomService.getRoom(guardedRoomCode);
+assert.deepEqual(rolledBackActivation.playback, leasedEmpty.playback, 'failed activation must roll back the entire playback object');
+assert.deepEqual(rolledBackActivation.playlist, leasedEmpty.playlist);
+assert.equal(rolledBackActivation.updatedAt, leasedEmpty.updatedAt, 'failed activation must restore the room timestamp');
+addFirstItemAtNextTimestamp(leasedEmpty);
 
 const adminFailoverRoomCode = `ADMFAIL${Date.now().toString(36).slice(-5).toUpperCase()}`;
 const adminFailoverCreation = roomService.createRoom(adminFailoverRoomCode, 'Admin Failover Verification');
@@ -691,6 +754,41 @@ assert.equal(
   null,
   'the bound creator socket should retain management access to a locked room',
 );
+
+const navigationRoomCode = `NAV${Date.now().toString(36).slice(-6).toUpperCase()}`;
+const navigationCreation = roomService.createRoom(navigationRoomCode, 'Navigation continuity');
+assert.ok(navigationCreation);
+const navigationIdentity = { roomCode: navigationRoomCode, memberId: 'navigation-creator', clientId: 'navigation-device' };
+roomService.joinRoom({ ...navigationIdentity, socketId: 'navigation-old', adminToken: navigationCreation.credentials.adminToken });
+const navigationReconnect = roomService.claimPendingMemberReconnectToken(navigationRoomCode, navigationIdentity.memberId);
+assert.ok(navigationReconnect);
+for (const credentials of [{}, { adminToken: navigationCreation.credentials.adminToken }, { reconnectToken: navigationReconnect }]) {
+  assert.equal((await roomService.getJoinRejection(navigationRoomCode, navigationIdentity.memberId,
+    undefined, credentials.adminToken, credentials.reconnectToken, 'navigation-new', navigationIdentity.clientId))?.code,
+    'member_online_elsewhere', 'even same-client strong credentials must wait for the old connection to leave');
+  assert.throws(() => roomService.joinRoom({ ...navigationIdentity, ...credentials, socketId: 'navigation-new' }), /cannot be replaced/i);
+}
+assert.equal(roomService.recoverAdminToken(navigationRoomCode, navigationCreation.credentials.recoveryCode,
+  { memberId: 'navigation-shadow', socketId: 'navigation-new' }), null, 'a live creator must remain protected from recovery takeover');
+const navigationDeparture = roomService.leaveBySocket('navigation-old')[0];
+assert.ok(navigationDeparture);
+assert.equal((await roomService.getJoinRejection(navigationRoomCode, navigationIdentity.memberId,
+  undefined, undefined, undefined, 'navigation-new', navigationIdentity.clientId))?.code, 'reconnect_token_invalid',
+  'client identity alone must not consume the reserved slot');
+assert.equal(await roomService.getJoinRejection(navigationRoomCode, navigationIdentity.memberId,
+  undefined, navigationCreation.credentials.adminToken, navigationReconnect, 'navigation-new', navigationIdentity.clientId), null);
+const navigationState = roomService.joinRoom({ ...navigationIdentity, socketId: 'navigation-new',
+  adminToken: navigationCreation.credentials.adminToken, reconnectToken: navigationReconnect });
+assert.deepEqual(navigationState.members.map(member => member.id), [navigationIdentity.memberId]);
+assert.equal(roomService.isCreatorAdmin(navigationRoomCode, navigationIdentity.memberId, navigationCreation.credentials.adminToken), true);
+assert.notEqual(roomService.claimPendingMemberReconnectToken(navigationRoomCode, navigationIdentity.memberId), navigationReconnect);
+assert.deepEqual(roomService.leaveBySocket('navigation-old'), [], 'a late old disconnect must not remove the new binding');
+assert.equal(roomService.isMemberSocket(navigationRoomCode, navigationIdentity.memberId, 'navigation-new'), true);
+assert.equal(roomService.finalizeMemberDeparture(navigationRoomCode, navigationIdentity.memberId, 'Creator',
+  navigationDeparture.reconnectUntil, navigationDeparture.reconnectUntil + 1), null, 'old departure timers must not evict the returned member');
+roomService.leaveBySocket('navigation-new');
+assert.ok(roomService.recoverAdminToken(navigationRoomCode, navigationCreation.credentials.recoveryCode,
+  { memberId: navigationIdentity.memberId, socketId: 'navigation-recovered' }), 'the original recovery code must still work after the old creator leaves');
 
 const continuityRoomCode = `CONT${Date.now().toString(36).slice(-6).toUpperCase()}`;
 roomService.joinRoom({ roomCode: continuityRoomCode, memberId: 'continuity-host', socketId: 'socket-continuity-host', name: 'Continuity Host' });

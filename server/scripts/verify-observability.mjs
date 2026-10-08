@@ -101,6 +101,8 @@ try {
     bytesBucket: '1-16MiB',
     elapsedBucket: '25-100ms',
   });
+  logStructuredEvent('session_release_decision', { ...common, decision: 'applied', socketId: 'secret-socket-id' });
+  logStructuredEvent('session_release_decision', { ...common, decision: 'noop', reconnectToken: sentinels.token });
   await new Promise((resolve) => setTimeout(resolve, 25));
 } finally {
   console.log = original.log;
@@ -108,7 +110,7 @@ try {
   console.error = original.error;
 }
 
-assert.equal(output.length, 8, 'the duplicate rejection should emit one bounded summary after its aggregation window');
+assert.equal(output.length, 10, 'the duplicate rejection should emit one bounded summary after its aggregation window');
 const records = output.map((line) => JSON.parse(line));
 assert.deepEqual(records.map((record) => record.event), [
   'playback_decision',
@@ -118,12 +120,16 @@ assert.deepEqual(records.map((record) => record.event), [
   'playback_decision',
   'proxy_fetch_decision',
   'room_store_decision',
+  'session_release_decision',
+  'session_release_decision',
   'playback_decision',
 ]);
 assert.equal(records.at(-1).suppressedCount, 1, 'the bounded summary should retain the number of suppressed events');
 assert.equal(Object.hasOwn(records[1], 'sourceType'), false, 'approved fields must still reject unapproved runtime values');
 assert.equal(records[4].reason, 'timeline_reanchored', 'accepted host re-anchors must remain visible after structured-log sanitization');
 assert.equal(records[5].reason, 'client_cancelled', 'browser-cancelled proxy streams must remain distinguishable from upstream timeouts');
+assert.deepEqual(records[7], { event: 'session_release_decision', decision: 'applied' });
+assert.deepEqual(records[8], { event: 'session_release_decision', decision: 'noop' });
 const forbiddenKeys = ['roomCode', 'memberId', 'token', 'url', 'ip', 'userAgent', 'payload', 'message', 'error'];
 for (const record of records) {
   for (const key of forbiddenKeys) assert.equal(Object.hasOwn(record, key), false, `${record.event} must reject ${key}`);

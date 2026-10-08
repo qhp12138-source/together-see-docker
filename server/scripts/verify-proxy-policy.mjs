@@ -295,13 +295,21 @@ async function verifyInFlightSessionRevocation() {
   }
 }
 
-async function verifyHlsRewriteFailsClosed() {
+async function verifyHlsRewriteFailsClosed(allowVerifiedDirect = false) {
   const port = await pickTestPort(45780);
-  const injectedRouter = createMediaProxyRouter(async (_req, targetUrl) => {
+  const host = allowVerifiedDirect ? 'unlisted.example.org' : 'media.example.com';
+  let fetchCalls = 0;
+  let observedAllowUnlisted;
+  // Inject only the upstream response; exercise the real HTTP grant and HLS rewrite.
+  // This fixture does not exercise DNS resolution or the redirect fetch loop.
+  const injectedRouter = createMediaProxyRouter(async (_req, targetUrl, _refUrl, _signal, allowUnlisted) => {
+    fetchCalls += 1;
+    observedAllowUnlisted = allowUnlisted;
     const upstream = new PassThrough();
     upstream.statusCode = 200;
     upstream.headers = { 'content-type': 'application/vnd.apple.mpegurl' };
-    upstream.end('#EXTM3U\n#EXTINF:5,\nhttps://media.example.com/valid-before-private.ts\n#EXTINF:5,\nhttp://127.0.0.1/private-segment.ts\n');
+    const privateEntry = allowVerifiedDirect && fetchCalls === 1 ? '' : '#EXTINF:5,\nhttp://127.0.0.1/private-segment.ts\n';
+    upstream.end(`#EXTM3U\n#EXTINF:5,\nhttps://${host}/valid-before-private.ts\n${privateEntry}`);
     return { response: upstream, responseUrl: targetUrl };
   });
   const app = express();
@@ -312,18 +320,30 @@ async function verifyHlsRewriteFailsClosed() {
     server.listen(port, '127.0.0.1', resolve);
   });
   try {
+    if (allowVerifiedDirect) recordVerifiedDirectMediaUrl(`https://${host}/master.m3u8`, 'hls');
     registerMediaProxySession('proxy-session-hls-closed', 'ROOM-HLS-CLOSED', 'member-hls-closed', proxyPolicyClientBinding);
     const grant = issueMediaProxyGrant(
       'hls',
-      'https://media.example.com/master.m3u8',
+      `https://${host}/master.m3u8`,
       '',
-      { sessionId: 'proxy-session-hls-closed' },
+      { sessionId: 'proxy-session-hls-closed', allowVerifiedDirect },
     );
+    if (allowVerifiedDirect) {
+      const publicResponse = await fetch(`http://127.0.0.1:${port}${grant.proxyUrl}`, {
+        headers: { 'user-agent': proxyPolicyUserAgent },
+      });
+      const publicBody = await publicResponse.text();
+      assert.equal(publicResponse.status, 200, 'a verified public HLS root must authorize its safe children');
+      assert.match(publicBody, /\/api\/proxy\/hls\?token=/);
+      assert.equal(publicBody.includes(host), false, 'rewritten children must remain opaque grants');
+    }
     const usageBefore = getMediaProxyGrantUsage('proxy-session-hls-closed');
     const response = await fetch(`http://127.0.0.1:${port}${grant.proxyUrl}`, {
       headers: { 'user-agent': proxyPolicyUserAgent },
     });
     const body = await response.text();
+    assert.equal(fetchCalls, allowVerifiedDirect ? 2 : 1, 'the real proxy route must reach the upstream fixture');
+    assert.equal(observedAllowUnlisted, allowVerifiedDirect, 'the verified scope must propagate to the fetcher');
     assert.equal(response.status, 502, 'a rejected HLS child target must fail the whole rewrite');
     assert.equal(body.includes('127.0.0.1'), false, 'a rejected child URI must never be returned to the browser');
     assert.deepEqual(
@@ -541,6 +561,91 @@ async function verifyHlsLargeRollingWindowsReuseReclaimableCapacity() {
   }
 }
 
+async function verifyNonPlaylistResponseSafety() {
+  const port = await pickTestPort(46180);
+  const mediaBytes = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255]);
+  const fixtures = [
+    { label: 'mp4', mime: 'Video/MP4; codecs="avc1"', expectedMime: 'video/mp4' },
+    { label: 'html', mime: 'text/html; charset=utf-8', denied: true, body: '<html><script>HTML_UPSTREAM_MUST_NOT_ESCAPE</script></html>' },
+    { label: 'svg', mime: 'image/svg+xml', denied: true, body: '<svg xmlns="http://www.w3.org/2000/svg" onload="SVG_UPSTREAM_MUST_NOT_ESCAPE()"></svg>' },
+    { label: 'ts', mime: 'video/mp2t', expectedMime: 'video/mp2t' },
+    { label: 'audio', mime: 'audio/mpeg', expectedMime: 'audio/mpeg' },
+    { label: 'application-mp4', mime: 'application/mp4', expectedMime: 'application/mp4' },
+    { label: 'application-ts', mime: 'application/mp2t', expectedMime: 'application/mp2t' },
+    { label: 'application-mpegts', mime: 'application/x-mpegts', expectedMime: 'application/x-mpegts' },
+    { label: 'octet', mime: 'application/octet-stream', expectedMime: 'application/octet-stream' },
+    { label: 'binary-octet', mime: 'binary/octet-stream', expectedMime: 'binary/octet-stream' },
+    { label: 'missing-mime', expectedMime: 'application/octet-stream' },
+    { label: 'empty-mime', mime: '', expectedMime: 'application/octet-stream' },
+  ];
+  const sessions = [];
+  let fixture;
+  let fetchCalls = 0;
+  let observedFetch;
+  // These bytes test the HTTP/MIME boundary, not container decoding. DNS and
+  // redirects are deliberately outside this injected upstream-response fixture.
+  const injectedRouter = createMediaProxyRouter(async (_req, targetUrl, _refUrl, _signal, allowUnlisted) => {
+    fetchCalls += 1;
+    observedFetch = { url: targetUrl.toString(), allowUnlisted };
+    const upstream = new PassThrough();
+    const bytes = fixture.denied ? Buffer.from(fixture.body) : mediaBytes;
+    upstream.statusCode = 200;
+    upstream.headers = { 'content-length': String(bytes.length) };
+    if (fixture.mime !== undefined) upstream.headers['content-type'] = fixture.mime;
+    upstream.end(bytes);
+    return { response: upstream, responseUrl: targetUrl };
+  });
+  const app = express();
+  app.use('/api', injectedRouter);
+  const server = createServer(app);
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  try {
+    for (const mode of ['normal', 'verified']) {
+      const sessionId = `proxy-response-safety-${mode}`;
+      sessions.push(sessionId);
+      registerMediaProxySession(sessionId, 'ROOM-RESPONSE-SAFETY', `member-${mode}`, proxyPolicyClientBinding);
+      const host = mode === 'normal' ? 'media.example.com' : `${mode}.example.org`;
+      const url = `https://${host}/response-safety.mp4`;
+      if (mode === 'verified') recordVerifiedDirectMediaUrl(url, 'video');
+      const grant = issueMediaProxyGrant('media', url, '', {
+        sessionId, allowVerifiedDirect: mode === 'verified',
+      });
+      // Reuse the exact same URL and grant as the upstream changes MP4 -> HTML/SVG.
+      for (fixture of fixtures) {
+        const label = `${mode}/${fixture.label}`;
+        const callsBefore = fetchCalls;
+        const response = await fetch(`http://127.0.0.1:${port}${grant.proxyUrl}`, {
+          headers: { 'user-agent': proxyPolicyUserAgent }, signal: AbortSignal.timeout(5000),
+        });
+        const body = Buffer.from(await response.arrayBuffer());
+        assert.equal(fetchCalls, callsBefore + 1, `${label}: the HTTP route must consume the grant`);
+        assert.deepEqual(observedFetch, { url, allowUnlisted: mode !== 'normal' }, `${label}: grant scope`);
+        assert.equal(response.headers.get('x-content-type-options'), 'nosniff', `${label}: nosniff`);
+        const csp = response.headers.get('content-security-policy') || '';
+        assert.deepEqual(csp.split(';').map(value => value.trim()).filter(Boolean).sort(),
+          ["default-src 'none'", 'sandbox'], `${label}: restrictive CSP without sandbox permissions`);
+        if (fixture.denied) {
+          assert.equal(response.status, 502, `${label}: active content must be rejected`);
+          assert.doesNotMatch(body.toString('utf8'), /<html|<script|<svg|UPSTREAM_MUST_NOT_ESCAPE/i,
+            `${label}: upstream markup and markers must not be echoed`);
+          assert.doesNotMatch(response.headers.get('content-type') || '', /text\/html|image\/svg\+xml/i);
+        } else {
+          assert.equal(response.status, 200, `${label}: supported media must be streamed`);
+          assert.equal(response.headers.get('content-type'), fixture.expectedMime, `${label}: normalized safe MIME`);
+          assert.deepEqual(body, mediaBytes, `${label}: bytes must survive unchanged`);
+        }
+      }
+    }
+  } finally {
+    sessions.forEach(revokeMediaProxySession);
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -548,10 +653,12 @@ function sleep(ms) {
 await verifyRoomSessionGrantLifecycle();
 await verifyInFlightSessionRevocation();
 await verifyHlsRewriteFailsClosed();
+await verifyHlsRewriteFailsClosed(true);
 await verifyHlsRewriteGrantReuse();
 await verifyHlsNormalizedTargetDedupe();
 await verifyHlsRollingManifestReclaimsStaleGrants();
 await verifyHlsLargeRollingWindowsReuseReclaimableCapacity();
+await verifyNonPlaylistResponseSafety();
 
 async function waitForHealth(baseUrl, getExitCode) {
   let lastError;

@@ -1,4 +1,5 @@
 import type { Server as HttpServer } from 'node:http';
+import type { Application } from 'express';
 import { createHmac, randomBytes } from 'node:crypto';
 import { Server } from 'socket.io';
 import { env, isPublicOriginAllowed } from '../config/env.js';
@@ -12,6 +13,9 @@ import {
 } from '../routes/proxy.routes.js';
 import { parseVideoUrl } from '../services/parser.service.js';
 import { roomService } from '../services/room.service.js';
+import { interactionCatalog } from '../services/interaction.service.js';
+import { InteractionDeliveryService } from '../services/interaction-delivery.service.js';
+import type { SessionReleaseHandler } from '../routes/room.routes.js';
 import { getTrustedClientAddress } from '../utils/client-address.js';
 import { createId, normalizeRoomCode } from '../utils/id.js';
 import { createLocalPlaceholderUrl, hasUsableLocalFileMeta } from '../utils/local-media.js';
@@ -133,6 +137,12 @@ interface ControllerObservation {
 
 type SocketInstance = import('socket.io').Socket;
 type RoomAck = (state: RoomState | null) => void;
+type PlaybackAck = (state: RoomState | null, decision?: {
+  accepted: boolean;
+  action: PlaybackAction;
+  baseRevision: number;
+  nextRevision: number;
+}) => void;
 
 const MAX_MEMBER_NAME_LENGTH = 24;
 const MAX_MEMBER_ID_LENGTH = 80;
@@ -294,12 +304,13 @@ function emitRoomState(io: Server, roomCode: string, state: RoomState): void {
 
 function emitRoomPermissions(socket: SocketInstance, roomCode: string, memberId: string, adminToken: string): void {
   const canManage = roomService.isCreatorAdmin(roomCode, memberId, adminToken);
+  const isCreator = roomService.isOriginalCreator(roomCode, memberId);
   socket.data.adminToken = canManage ? adminToken : '';
   socket.emit('room_permissions', {
     roomCode,
     memberId,
     canManage,
-    isCreator: roomService.isOriginalCreator(roomCode, memberId),
+    isCreator,
   });
 }
 
@@ -483,7 +494,7 @@ function findProxyPlaylistItem(state: RoomState, routeName: 'hls' | 'media', raw
   const requestedUrl = canonicalProxySourceUrl(rawUrl);
   if (!requestedUrl) return null;
   const expectedType: SourceType = routeName === 'hls' ? 'hls' : 'video';
-  return state.playlist.find((item) => item.sourceType === expectedType
+  return state.playlist.find((item) => item.clientDirectOnly !== true && item.sourceType === expectedType
     && canonicalProxySourceUrl(item.sourceUrl) === requestedUrl) || null;
 }
 
@@ -518,6 +529,9 @@ export function sanitizePlaylistItem(item: PlaylistPayload['item'], memberId: st
   const sharedPageUrl = sourceType === 'local' ? sharedSourceUrl : (pageUrl || sharedSourceUrl);
   const bilibiliMeta = sourceType === 'local' ? undefined : sanitizeBilibiliSourceMeta(item.bilibili);
   const bilibili = bilibiliMeta && isBilibiliPageUrl(pageUrl) ? bilibiliMeta : undefined;
+  const clientDirectOnly = item.clientDirectOnly === true && !isBilibiliPageUrl(pageUrl)
+    && (sourceType === 'video' || sourceType === 'hls')
+    && sharedPageUrl === sharedSourceUrl;
 
   return {
     id: cleanText(item.id, 80) || undefined,
@@ -528,7 +542,8 @@ export function sanitizePlaylistItem(item: PlaylistPayload['item'], memberId: st
     createdAt: Number.isFinite(Number(item.createdAt)) ? Number(item.createdAt) : undefined,
     addedBy: memberId,
     localFile,
-    requiresClientParse: Boolean(item.requiresClientParse),
+    clientDirectOnly,
+    requiresClientParse: clientDirectOnly ? false : Boolean(item.requiresClientParse),
     parseMessage: cleanText(item.parseMessage, 240),
     finalUrl: sourceType === 'local' ? '' : finalUrl,
     refererUrl,
@@ -627,6 +642,11 @@ function sanitizePlaybackAction(value: unknown): PlaybackAction | null {
 }
 
 export function attachSocketServer(httpServer: HttpServer): Server {
+  const interactionMemberLimiter = new BoundedSlidingWindowRateLimiter();
+  const interactionRoomLimiter = new BoundedSlidingWindowRateLimiter();
+  // Capture Express before Engine.IO wraps the HTTP request listener.
+  const requestApps = httpServer.listeners('request').filter((listener) =>
+    typeof (listener as Application).locals === 'object') as Application[];
   const io = new Server(httpServer, {
     path: '/socket.io',
     allowRequest: (req, callback) => {
@@ -639,6 +659,20 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       credentials: true,
     },
   });
+
+  const interactionDelivery = new InteractionDeliveryService(io);
+  httpServer.once('close', () => interactionDelivery.close());
+
+  const releaseRoomSession: SessionReleaseHandler = ({ roomCode, memberId, socketId, reconnectToken }) => {
+    const target = io.sockets.sockets.get(socketId);
+    if (!target?.connected || getSocketRoomCode(target) !== roomCode || getSocketMemberId(target) !== memberId) return false;
+    if (!roomService.canReleaseMemberSession(roomCode, memberId, socketId, reconnectToken)) return false;
+    // No awaits between validating the current binding and disconnecting it.
+    // The existing disconnect handler revokes proxy grants and reserves reconnect identity.
+    target.disconnect(true);
+    return true;
+  };
+  requestApps.forEach((app) => { app.locals.releaseRoomSession = releaseRoomSession; });
 
   function scheduleHostFailover(roomCode: string, departedHostId: string): void {
     const remainingMs = roomService.getHostReconnectRemainingMs(roomCode);
@@ -743,6 +777,9 @@ export function attachSocketServer(httpServer: HttpServer): Server {
         socket.id,
         clientId,
       );
+      // Navigation may close the socket while asynchronous password validation runs.
+      // Never commit an orphan member after its disconnect handler has already run.
+      if (!socket.connected) return;
       if (rejection) {
         logJoinRejection(socket, roomCode, adminToken, rejection.code);
         socket.emit('room_error', { message: rejection.message, code: rejection.code, attemptId });
@@ -762,6 +799,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
         clientId,
       });
 
+      interactionDelivery.drop(socket);
       socket.data.roomCode = roomCode;
       socket.data.memberId = memberId;
       registerMediaProxySession(
@@ -1024,6 +1062,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       }
 
       const addedItem = state.playlist.at(-1);
+      if (before.playback.activeSourceId !== state.playback.activeSourceId) interactionDelivery.dropRoom(context.roomCode);
       logPlaylistDecision(socket, context.roomCode, context.memberId, 'add', 'accepted', 'accepted', before, state, addedItem?.id, addedItem?.sourceType);
       ack?.(state);
       emitRoomState(io, context.roomCode, state);
@@ -1153,6 +1192,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       }
       const before = snapshotPlaylistLogState(context.state);
       const state = roomService.deletePlaylistItem(context.roomCode, itemId);
+      if (state && before.playback.activeSourceId !== state.playback.activeSourceId) interactionDelivery.dropRoom(context.roomCode);
       if (state) logPlaylistDecision(socket, context.roomCode, context.memberId, 'delete', 'accepted', 'accepted', before, state, itemId);
       ack?.(state);
       if (state) emitRoomState(io, context.roomCode, state);
@@ -1178,7 +1218,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       if (state) emitRoomState(io, context.roomCode, state);
     });
 
-    socket.on('playback_update', (payload: PlaybackPayload, ack?: RoomAck) => {
+    socket.on('playback_update', (payload: PlaybackPayload, ack?: PlaybackAck) => {
       const requestedAction = sanitizePlaybackAction(payload?.action);
       const observation: ControllerObservation = { category: 'playback', action: requestedAction || 'legacy' };
       const context = requireController(socket, payload?.roomCode, ack, observation);
@@ -1212,6 +1252,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       const baseRevision = Number.isSafeInteger(payload?.baseRevision)
         ? Number(payload.baseRevision)
         : (legacyHostUpdate ? context.state.playback.revision : -1);
+      const previousSourceId = context.state.playback.activeSourceId;
       const decision = roomService.updatePlaybackWithDecision(context.roomCode, {
         ...sanitizePlaybackPatch(payload?.patch),
         updatedBy: context.memberId,
@@ -1223,6 +1264,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
         clientSeeking: payload?.client?.seeking === true,
       });
       const state = decision.state;
+      if (state && previousSourceId !== state.playback.activeSourceId) interactionDelivery.dropRoom(context.roomCode);
       if (action !== 'periodic' || !decision.accepted || decision.reason !== 'accepted') {
         logPlaybackDecision(
           socket,
@@ -1245,7 +1287,7 @@ export function attachSocketServer(httpServer: HttpServer): Server {
           },
         );
       }
-      ack?.(state);
+      ack?.(state, { accepted: decision.accepted, action, baseRevision, nextRevision: decision.nextRevision });
       if (state && decision.accepted) {
         socket.to(context.roomCode).emit('playback_state', state.playback);
       } else if (state) {
@@ -1358,6 +1400,45 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       }
     });
 
+    socket.on('interaction_send', (payload: unknown, ack?: (result: { ok: boolean; message?: string }) => void) => {
+      const reply = (ok: boolean, message?: string) => {
+        if (typeof ack === 'function') ack(message ? { ok, message } : { ok });
+      };
+      // This ephemeral channel deliberately does not use rejectRoomAction, whose
+      // room_error/RoomState response would disturb playback and room snapshots.
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return reply(false, '互动参数无效');
+      const input = payload as Record<string, unknown>;
+      const roomCode = getSocketRoomCode(socket);
+      const memberId = getSocketMemberId(socket);
+      if (!socket.connected || !roomCode || !memberId || input.roomCode !== roomCode
+        || !socket.rooms.has(roomCode) || !roomService.isMemberSocket(roomCode, memberId, socket.id)) {
+        return reply(false, '请先加入当前房间');
+      }
+      const state = roomService.getRoom(roomCode);
+      if (typeof input.sourceId !== 'string' || !input.sourceId
+        || state?.playback.activeSourceId !== input.sourceId
+        || !state.playlist.some(item => item.id === input.sourceId)) return reply(false, '当前播放源已变化');
+      if (typeof input.x !== 'number' || !Number.isFinite(input.x) || input.x < 0 || input.x > 1
+        || typeof input.y !== 'number' || !Number.isFinite(input.y) || input.y < 0 || input.y > 1
+        || typeof input.assetId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(input.assetId)) {
+        return reply(false, '互动参数无效');
+      }
+      const now = Date.now();
+      // Membership, not the connection id: reconnecting does not replenish a quota.
+      if (!interactionMemberLimiter.allow(JSON.stringify([roomCode, memberId]), 4, 3000, now)) {
+        return reply(false, '互动发送太频繁，请稍后再试');
+      }
+      const asset = interactionCatalog.getCatalog().items.find(item => item.id === input.assetId);
+      if (!asset) return reply(false, '互动素材不可用');
+      if (!interactionRoomLimiter.allow(roomCode, 20, 3000, now)) return reply(false, '房间互动太频繁，请稍后再试');
+      // The short queue is bound to current sockets, never room history/reconnect.
+      interactionDelivery.broadcast(roomCode, {
+        id: createId('interaction'), assetId: asset.id, assetRevision: asset.revision, sourceId: input.sourceId,
+        x: input.x, y: input.y, sentAt: Date.now(), durationMs: asset.durationMs,
+      });
+      reply(true);
+    });
+
     socket.on('chat_message', (payload: { roomCode: string; text: string }, ack?: RoomAck) => {
       const context = requireRoomMember(socket, payload?.roomCode, ack);
       if (!context) return;
@@ -1426,8 +1507,13 @@ export function attachSocketServer(httpServer: HttpServer): Server {
       ack?.(Date.now());
     });
 
-    socket.on('disconnect', () => {
-      suspendMediaProxySession(socket.id, env.roomReconnectGraceMs);
+    socket.on('disconnect', (reason) => {
+      interactionDelivery.drop(socket);
+      if (reason === 'client namespace disconnect' || reason === 'server namespace disconnect') {
+        revokeMediaProxySession(socket.id);
+      } else {
+        suspendMediaProxySession(socket.id, env.roomReconnectGraceMs);
+      }
       const changes = roomService.leaveBySocket(socket.id);
       changes.forEach(({ roomCode, state, departedHostId, departedAdminId, memberId, memberName, reconnectUntil }) => {
         emitRoomState(io, roomCode, state);

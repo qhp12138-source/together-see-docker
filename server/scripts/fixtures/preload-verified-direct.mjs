@@ -1,4 +1,21 @@
 import { recordVerifiedDirectMediaUrl } from '../../dist/services/parser.service.js';
+import https from 'node:https';
+import { syncBuiltinESMExports } from 'node:module';
+import { PassThrough } from 'node:stream';
+
+// Admit a syntactically public playlist URL, but deterministically fail its media
+// probe. This tests legacy bypass parameters without DNS or external traffic.
+const originalRequest = https.request;
+https.request = function (input, ...args) {
+  if (String(input) === 'https://93.184.216.34/public-unverified.mp4') {
+    const request = new PassThrough();
+    request.setTimeout = () => request;
+    queueMicrotask(() => request.destroy(Object.assign(new Error('Synthetic unverified media'), { code: 'ECONNRESET' })));
+    return request;
+  }
+  return originalRequest.call(this, input, ...args);
+};
+syncBuiltinESMExports();
 
 recordVerifiedDirectMediaUrl('https://93.184.216.34/verified-room-video.mp4?token=exact', 'video');
 recordVerifiedDirectMediaUrl('https://93.184.216.34/verified-room-stream.m3u8?token=exact', 'hls');

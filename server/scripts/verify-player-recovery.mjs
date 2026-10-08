@@ -262,7 +262,7 @@ const socketSource = fs.readFileSync(path.join(projectRoot, 'server/src/sockets/
 const roomRouteSource = fs.readFileSync(path.join(projectRoot, 'server/src/routes/room.routes.ts'), 'utf8');
 const roomServiceSource = fs.readFileSync(path.join(projectRoot, 'server/src/services/room.service.ts'), 'utf8');
 const roomStoreSource = fs.readFileSync(path.join(projectRoot, 'server/src/services/room-store.service.ts'), 'utf8');
-const disclaimerPattern = /<footer class="site-disclaimer" aria-label="免责声明">[\s\S]*本站仅供学习交流与技术研究[\s\S]*不提供、不上传或存储任何视频文件[\s\S]*不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。[\s\S]*<\/footer>/;
+const disclaimerPattern = /<footer class="site-disclaimer" aria-label="免责声明">[\s\S]*本站仅供学习交流与技术研究[\s\S]*不接收或持久保存用户上传的观影视频[\s\S]*短时互动素材由维护者配置[\s\S]*不支持绕过登录、会员、付费、验证码或 DRM 等访问限制。[\s\S]*<\/footer>/;
 
 const sourceFollowTarget = {
   dataset: { sourceId: 'source-b', sourceType: 'video' },
@@ -296,6 +296,7 @@ const sourceFollowHarness = vm.createContext({
     clearPending: () => { sourceFollowHarness.pendingCleared = true; },
   },
   roomState: {},
+  preparedPlaybackStart: null,
   updatePlaybackAuthorityUi: () => {},
   remotePlayOperations: { invalidate: () => {} },
   playlistList: { querySelector: () => sourceFollowTarget },
@@ -361,20 +362,20 @@ assert.match(playerSource, /function isEditableControl\(element\)[\s\S]*element\
 assert.match(playerSource, /controls\?\.addEventListener\("focusin"[\s\S]*controlsFocusInside = isEditableControl\(event\.target\);[\s\S]*keepControlsVisible\(\)/, 'focused controller inputs must remain visible');
 assert.match(playerSource, /danmakuInput\?\.addEventListener\("input", keepControlsVisible\)/, 'typing danmaku must keep mobile controls visible');
 assert.match(roomHtml, /<div class="player-brand-line">一起See<\/div>/, 'player brand should only show the Chinese product name');
-assert.match(indexHtml, /rel="icon" type="image\/svg\+xml" href="\.\/assets\/icons\/together-see\.svg\?v=20260904-bilibili-fallback"/, 'home page should publish the shared SVG favicon');
-assert.match(roomHtml, /rel="icon" type="image\/svg\+xml" href="\.\/assets\/icons\/together-see\.svg\?v=20260904-bilibili-fallback"/, 'room page should publish the shared SVG favicon');
+assert.match(indexHtml, /rel="icon" type="image\/svg\+xml" href="\.\/assets\/icons\/together-see\.svg\?v=20261008-release-freeze"/, 'home page should publish the shared SVG favicon');
+assert.match(roomHtml, /rel="icon" type="image\/svg\+xml" href="\.\/assets\/icons\/together-see\.svg\?v=20261008-release-freeze"/, 'room page should publish the shared SVG favicon');
 assert.doesNotMatch(indexHtml, /class="brand-mark">TS<\/span>/, 'home brand must not retain the TS placeholder');
 assert.doesNotMatch(roomHtml, /class="brand-mark">TS<\/span>/, 'room brand must not retain the TS placeholder');
-assert.match(indexHtml, /class="brand-mark" aria-hidden="true"><img src="\.\/assets\/icons\/together-see\.svg\?v=20260904-bilibili-fallback" alt="" \/><\/span>/, 'home brand should reuse the favicon asset');
-assert.match(roomHtml, /class="brand-mark" aria-hidden="true"><img src="\.\/assets\/icons\/together-see\.svg\?v=20260904-bilibili-fallback" alt="" \/><\/span>/, 'room brand should reuse the favicon asset');
+assert.match(indexHtml, /class="brand-mark" aria-hidden="true"><img src="\.\/assets\/icons\/together-see\.svg\?v=20261008-release-freeze" alt="" \/><\/span>/, 'home brand should reuse the favicon asset');
+assert.match(roomHtml, /class="brand-mark" aria-hidden="true"><img src="\.\/assets\/icons\/together-see\.svg\?v=20261008-release-freeze" alt="" \/><\/span>/, 'room brand should reuse the favicon asset');
 assert.match(brandIconSvg, /viewBox="0 0 36 36"[\s\S]*<title>一起See<\/title>[\s\S]*fill="#72E7FF"/, 'brand icon should retain the supplied viewBox and accessible identity');
 assert.match(mainCss, /\.brand-mark img \{ display:block; width:100%; height:100%; \}/, 'brand icon should fill its stable header mark');
 assert.match(mainCss, /\.circle-button \{[\s\S]*position: relative;[\s\S]*padding: 0;[\s\S]*\.circle-button > svg \{[\s\S]*position: absolute;[\s\S]*inset: 0;[\s\S]*margin: auto;/, 'circular player icons should remain centered independently of browser button padding');
 assert.match(indexHtml, disclaimerPattern, 'the home page should end with the official learning-use disclaimer');
 assert.match(roomHtml, disclaimerPattern, 'the room page should end with the official learning-use disclaimer');
 assert.match(mainCss, /\.site-disclaimer\s*\{[\s\S]*border-top:[\s\S]*grid-template-columns:[\s\S]*color: var\(--faint\)/, 'the disclaimer should use a quiet responsive footer treatment');
-assert.match(mainCss, /-webkit-backdrop-filter:blur\(16px\) saturate\(145%\)/, 'transparent player glass needs the lighter Safari backdrop filter');
-assert.match(mainCss, /-webkit-backdrop-filter:blur\(14px\) saturate\(140%\)/, 'mobile player glass should use the lighter blur');
+assert.match(mainCss, /-webkit-backdrop-filter:saturate\(115%\)/, 'clear player glass should preserve the Safari saturation filter without blur');
+assert.match(mainCss, /rgba\(12,15,20,\.66\)/, 'clear player glass should retain a readable tinted base');
 assert.match(mainCss, /\.fullscreen-danmaku-compose input \{[\s\S]*?height:27px;[\s\S]*?border-radius:999px;/, 'danmaku composer should be compact and visibly rounded');
 assert.doesNotMatch(roomSource, /window\.(?:prompt|confirm|alert)\s*\(/, 'room workflows must not use browser-native dialogs');
 assert.match(roomSource, /function startPlaylistRename\(item\)[\s\S]*setInterfaceIcon\(confirm, "check"\);[\s\S]*setInterfaceIcon\(cancel, "x"\);/, 'playlist titles should use icon-based inline actions');
@@ -468,7 +469,7 @@ assert.match(roomSource, /function predictHostTime\(playback\)[\s\S]*playback\.p
 assert.match(roomSource, /function handlePlayerBufferingChange\(event\)[\s\S]*publishLocalBufferingState\(true\)[\s\S]*BUFFERING_PUBLISH_DELAY_MS[\s\S]*publishLocalBufferingState\(false\)/, 'the current authority should publish sustained buffering with a debounced start and immediate recovery');
 assert.match(roomSource, /BUFFERING_ACK_TIMEOUT_MS = 5000[\s\S]*createAckSingleFlight[\s\S]*function publishLocalBufferingState\(buffering\)[\s\S]*localBufferingAckFlight\.begin[\s\S]*localBufferingAckFlight\.settle/, 'buffering start and recovery must serialize through bounded authoritative acknowledgements');
 assert.match(roomSource, /function resetLocalBufferingPublishState\(\)[\s\S]*localBufferingAckFlight\.reset\(\)[\s\S]*socket\.on\("connect"[\s\S]*resetLocalBufferingPublishState\(\)[\s\S]*socket\.on\("disconnect"[\s\S]*resetLocalBufferingPublishState\(\)/, 'socket lifecycle changes must invalidate pending buffering acknowledgements');
-assert.match(roomSource, /authoritativePlayback\.buffering === true[\s\S]*playing: false[\s\S]*setDesiredPlaybackState/, 'followers should pause locally while preserving the authority playback intent during buffering');
+assert.match(roomSource, /if \(authoritativePlayback\.buffering === true\) \{[\s\S]*if \(!authoritativePlayback\.playing && !video\.paused\) video\.pause\(\)/, 'buffering alone must not pause a healthy follower');
 assert.match(roomSource, /baseRevision: baseRevision[\s\S]*ready: action === "source"/, 'playback updates should include a base revision, action and client readiness');
 assert.match(roomSource, /function handlePlaybackUpdateAck\(state, baseRevision, requestContext\)[\s\S]*remotePlaybackSnapshots\.observe\(playback\)[\s\S]*!observed\.accepted[\s\S]*roomState\.playback = authoritativePlayback/, 'out-of-order playback acknowledgements must pass the revision queue before replacing local authority state');
 assert.match(roomSource, /function handlePlaybackUpdateAck\(state, baseRevision, requestContext\)[\s\S]*sourceIntentGate\.shouldIgnore\(playback,[\s\S]*requestContext: requestContext/, 'playback acknowledgements must be tied to the source generation that emitted them');
@@ -515,8 +516,8 @@ assert.match(mainCss, /\.room-security-content\s*\{[\s\S]*max-height:[\s\S]*over
 assert.match(mainCss, /height:\s*100dvh\s*!important/, 'page fullscreen should follow the mobile dynamic viewport');
 assert.match(siteSource, /replace\(\/\[\?#&=\\\\\/:;%\]\/g, ""\)[\s\S]*\.slice\(0, 64\)[\s\S]*\.trim\(\)/, 'home room names should use the same normalization as the room page and server');
 assert.match(siteSource, /result\.room\?\.roomCode \|\| roomName/, 'home navigation and credentials should use the canonical server room code');
-assert.match(indexHtml, /assets\/js\/credentials\.js\?v=20260904-bilibili-fallback[\s\S]*assets\/js\/site\.js\?v=20260904-bilibili-fallback/, 'home should load the credential lifecycle before creation code');
-assert.match(roomHtml, /assets\/js\/credentials\.js\?v=20260904-bilibili-fallback[\s\S]*assets\/js\/room\.js\?v=20260904-bilibili-fallback/, 'room should load the credential lifecycle before admission code');
+assert.match(indexHtml, /assets\/js\/credentials\.js\?v=20261008-release-freeze[\s\S]*assets\/js\/site\.js\?v=20261008-release-freeze/, 'home should load the credential lifecycle before creation code');
+assert.match(roomHtml, /assets\/js\/credentials\.js\?v=20261008-release-freeze[\s\S]*assets\/js\/room\.js\?v=20261008-release-freeze/, 'room should load the credential lifecycle before admission code');
 assert.match(credentialSource, /function stageCreated\(adminToken, recoveryCode\)[\s\S]*savePending\(adminToken, recoveryCode\)[\s\S]*sessionVerified/, 'HTTP creation should retain a read-back-checked pending fallback');
 assert.match(credentialSource, /function finalizeCreated\(adminToken, recoveryCode\)[\s\S]*matchesPending[\s\S]*clearPending\(\)/, 'pending creation credentials should clear only after successful room admission');
 assert.match(siteSource, /goRoom\(canonicalRoomName, \{ created: true \}\)/, 'new room navigation should carry a non-secret creator-admission marker');

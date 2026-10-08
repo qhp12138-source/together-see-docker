@@ -60,7 +60,7 @@ function parseEnginePayload(text) {
 
 function decodeSocketPacket(packet) {
   if (packet === '2') return { type: 'ping' };
-  if (packet === '40' || packet.startsWith('40{')) return { type: 'connect' };
+  if (packet === '40' || packet.startsWith('40{')) return { type: 'connect', data: packet === '40' ? null : JSON.parse(packet.slice(2)) };
   if (packet.startsWith('43')) {
     const match = packet.match(/^43(\d+)(.*)$/);
     if (!match) return { type: 'other', raw: packet };
@@ -78,6 +78,7 @@ class PollingSocket {
     this.label = label;
     this.headers = headers;
     this.sid = '';
+    this.socketId = '';
     this.events = [];
     this.acks = [];
     this.counter = 0;
@@ -104,7 +105,9 @@ class PollingSocket {
     this.sid = JSON.parse(openPacket.slice(1)).sid;
     assert.ok(this.sid, `${this.label} should receive a sid`);
     await this.post('40');
-    await this.pollUntil((packet) => packet.type === 'connect', 1500);
+    const connected = await this.pollUntil((packet) => packet.type === 'connect', 1500);
+    this.socketId = connected.data?.sid || '';
+    assert.ok(this.socketId, `${this.label} should receive its separate Socket.IO id`);
   }
 
   async post(packet) {
@@ -171,6 +174,132 @@ class PollingSocket {
   }
 }
 
+async function verifyNavigationSessionOverlap() {
+  const headers = { 'user-agent': 'navigation-session-regression', 'x-forwarded-for': '198.51.100.77' };
+  const old = new PollingSocket(baseUrl, 'navigation old', headers);
+  const next = new PollingSocket(baseUrl, 'navigation new', headers);
+  const recovery = new PollingSocket(baseUrl, 'navigation recovery', headers);
+  const code = `NAVSOCKET${Date.now().toString(36)}`;
+  const identity = { roomCode: code, memberId: 'navigation-creator', clientId: 'navigation-device', name: 'Navigation Creator' };
+  try {
+    const created = await fetchJson(`${baseUrl}/api/rooms/${encodeURIComponent(code)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ roomName: code, adminToken: 'N'.repeat(32), recoveryCode: 'NAVIG-ATION-RECOV-ERY12' }),
+    });
+    assert.equal(created.response.status, 201);
+    await old.connect();
+    await next.connect();
+    await recovery.connect();
+    await old.emitWithAck('join_room', { ...identity, adminToken: created.body.adminToken });
+    const tokenEvent = await old.waitForEvent('room_member_token', value => value.memberId === identity.memberId);
+    const reconnectToken = tokenEvent.data.reconnectToken;
+    for (const [index, credentials] of [{}, { adminToken: created.body.adminToken }, { reconnectToken }].entries()) {
+      const attemptId = `navigation-overlap-${index}`;
+      assert.equal(await next.emitWithAck('join_room', { ...identity, ...credentials, attemptId }), null);
+      await next.waitForEvent('room_error', value => value.attemptId === attemptId && value.code === 'member_online_elsewhere');
+    }
+    const blockedRecovery = await recovery.emitWithAck('recover_admin_token', {
+      ...identity, recoveryCode: created.body.recoveryCode,
+    });
+    assert.equal(blockedRecovery.ok, false, 'the real online creator must not be recovered by another socket');
+    const mediaUrl = 'https://93.184.216.34/verified-room-video.mp4?token=exact';
+    await old.emit('playlist_add', { roomCode: code, item: {
+      id: 'navigation-media', title: 'Navigation', sourceType: 'video', sourceUrl: mediaUrl, pageUrl: mediaUrl,
+    } });
+    await old.waitForEvent('room_state', value => value.playlist?.some(item => item.id === 'navigation-media'));
+    await old.emit('proxy_token_request', { roomCode: code, requestId: 'navigation-grant', routeName: 'media', url: mediaUrl });
+    const grant = (await old.waitForEvent('proxy_token_created', value => value.requestId === 'navigation-grant')).data;
+    assert.equal(grant.success, true);
+    await sleep(350);
+    assert.equal(await next.emitWithAck('join_room', { ...identity, reconnectToken, attemptId: 'navigation-still-live' }), null);
+    await next.waitForEvent('room_error', value => value.attemptId === 'navigation-still-live' && value.code === 'member_online_elsewhere');
+    const releasePayload = { roomCode: code, memberId: identity.memberId, socketId: old.socketId, reconnectToken, createdAt: Date.now() };
+    const release = (payload, origin = baseUrl) => fetch(`${baseUrl}/api/session-release`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json', ...(origin === null ? {} : { origin }) },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(3000),
+    });
+    for (const origin of [null, 'null', 'https://untrusted.example', `${baseUrl}/not-an-origin`]) {
+      const rejected = await release(releasePayload, origin);
+      assert.equal(rejected.status, 403, 'missing, opaque, malformed and foreign origins cannot release a Socket');
+      assert.equal((await rejected.json()).code, 'session_release_origin_denied');
+    }
+    const malformed = await release({ ...releasePayload, reconnectToken: undefined, adminToken: created.body.adminToken });
+    assert.equal(malformed.status, 400, 'admin credentials do not substitute for the reconnect secret');
+    await malformed.arrayBuffer();
+    for (const invalid of [
+      { ...releasePayload, roomCode: `${code}-wrong` },
+      { ...releasePayload, memberId: 'wrong-member' },
+      { ...releasePayload, socketId: next.socketId },
+      { ...releasePayload, socketId: old.sid },
+      { ...releasePayload, reconnectToken: 'Z'.repeat(32) },
+      { ...releasePayload, reconnectToken: created.body.adminToken },
+    ]) {
+      const ignored = await release(invalid);
+      assert.equal(ignored.status, 204, 'invalid release credentials receive an indistinguishable no-op response');
+      assert.equal(await ignored.text(), '');
+    }
+    const stillBound = await old.emitWithAck('join_room', { ...identity, adminToken: created.body.adminToken });
+    assert.deepEqual(stillBound.members.map(member => member.id), [identity.memberId], 'rejected HTTP releases must leave the old binding intact');
+    assert.equal(await next.emitWithAck('join_room', { ...identity, reconnectToken, attemptId: 'navigation-after-invalid-release' }), null);
+    await next.waitForEvent('room_error', value => value.attemptId === 'navigation-after-invalid-release' && value.code === 'member_online_elsewhere');
+
+    // Leave the old polling transport open: only the authenticated HTTP request releases it.
+    const accepted = await release(releasePayload);
+    assert.equal(accepted.status, 204, 'local-only ticket metadata such as createdAt is accepted but is not authorization');
+    assert.equal(accepted.headers.get('cache-control'), 'no-store');
+    assert.equal(await accepted.text(), '');
+    assert.equal((await release(releasePayload)).status, 204, 'a duplicate pagehide/new-document release is harmless');
+    const revoked = await fetch(`${baseUrl}${grant.proxyUrl}`, { headers, signal: AbortSignal.timeout(3000) });
+    await revoked.arrayBuffer();
+    assert.equal(revoked.status, 401, 'HTTP navigation release must revoke the old grant before any new join');
+    assert.equal(await next.emitWithAck('join_room', { ...identity, attemptId: 'navigation-no-secret' }), null);
+    await next.waitForEvent('room_error', value => value.attemptId === 'navigation-no-secret' && value.code === 'reconnect_token_invalid');
+    const joined = await next.emitWithAck('join_room', { ...identity, reconnectToken, adminToken: created.body.adminToken });
+    assert.deepEqual(joined.members.map(member => member.id), [identity.memberId]);
+    await next.waitForEvent('room_permissions', value => value.canManage && value.isCreator);
+    const rotated = (await next.waitForEvent('room_member_token', value => value.memberId === identity.memberId)).data.reconnectToken;
+    assert.notEqual(rotated, reconnectToken);
+    for (const stale of [releasePayload,
+      { ...releasePayload, socketId: next.socketId },
+      { ...releasePayload, reconnectToken: rotated },
+    ]) {
+      assert.equal((await release(stale)).status, 204, 'an old Socket or old token cannot release the successor');
+    }
+    await old.close();
+    const afterLateClose = await next.emitWithAck('join_room', { ...identity, reconnectToken: rotated, adminToken: created.body.adminToken });
+    assert.deepEqual(afterLateClose.members.map(member => member.id), [identity.memberId], 'a late old namespace close must leave the new binding intact');
+    let limited = false;
+    for (let attempt = 0; attempt < 61; attempt += 1) {
+      const response = await release(releasePayload);
+      await response.arrayBuffer();
+      if (response.status === 429) {
+        assert.equal(response.headers.get('retry-after'), '60');
+        limited = true;
+        break;
+      }
+      assert.equal(response.status, 204);
+    }
+    assert.equal(limited, true, 'HTTP session release attempts are rate limited even when they are stale');
+    const throttledValid = await release({ ...releasePayload, socketId: next.socketId, reconnectToken: rotated });
+    assert.equal(throttledValid.status, 429, 'rate limiting precedes the release side effect');
+    await throttledValid.arrayBuffer();
+    const afterThrottling = await next.emitWithAck('join_room', { ...identity, reconnectToken: rotated, adminToken: created.body.adminToken });
+    assert.deepEqual(afterThrottling.members.map(member => member.id), [identity.memberId], 'a throttled release cannot kill the successor');
+    await next.close();
+    const restored = await recovery.emitWithAck('recover_admin_token', { ...identity, recoveryCode: created.body.recoveryCode });
+    assert.equal(restored.ok, true, 'the same recovery code must remain usable after the creator disconnects');
+    const restoredToken = (await recovery.waitForEvent('room_admin_token', value => value.recovered === true)).data.adminToken;
+    const recoveredState = await recovery.emitWithAck('join_room', { ...identity, adminToken: restoredToken });
+    assert.deepEqual(recoveredState.members.map(member => member.id), [identity.memberId]);
+  } finally {
+    await old.close();
+    await next.close();
+    await recovery.close();
+  }
+}
+
 const port = await pickTestPort();
 const baseUrl = `http://127.0.0.1:${port}`;
 const storeFile = path.join(serverRoot, 'data', `verify-socket-smoke-${Date.now()}.json`);
@@ -190,6 +319,8 @@ const child = spawn(process.execPath, ['dist/server.js'], {
     ROOM_HOST_RECONNECT_GRACE_MS: '1000',
     PARSE_RATE_LIMIT_PER_MINUTE: '0',
     HLS_PROXY_ALLOWED_HOSTS: 'media.example.com,*.bilivideo.com',
+    DEVELOPER_MEDIA_ENABLED: 'true',
+    DEVELOPER_MEDIA_KEY: 'socket-developer-test-key-'.repeat(3),
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${verifiedDirectPreload}`].filter(Boolean).join(' '),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -234,6 +365,7 @@ const roomCreationCredentials = {
 
 try {
   await waitForHealth(baseUrl, () => childExitCode);
+  await verifyNavigationSessionOverlap();
   await host.connect();
   await guest.connect();
   await overflowGuest.connect();
@@ -285,6 +417,9 @@ try {
   const hostMemberTokenEvent = await host.waitForEvent('room_member_token', (payload) => payload.roomCode === roomCode && payload.memberId === 'host-a' && payload.reconnectToken);
   const hostPermissionEvent = await host.waitForEvent('room_permissions', (payload) => payload.roomCode === roomCode && payload.memberId === 'host-a');
   assert.equal(hostPermissionEvent.data.canManage, true, 'the server should privately confirm creator management permission');
+  assert.equal('developerMediaAvailable' in hostPermissionEvent.data, false, 'public permissions must not expose a developer capability');
+  assert.deepEqual(Object.keys(hostPermissionEvent.data).sort(), ['canManage', 'isCreator', 'memberId', 'roomCode'],
+    'permissions must expose only non-secret capability data');
   const tokenEvent = { data: { adminToken: createdRoom.body.adminToken, recoveryCode: createdRoom.body.recoveryCode } };
   assert.ok(tokenEvent.data.adminToken, 'host should receive an admin token');
   assert.ok(tokenEvent.data.recoveryCode, 'host should receive an admin recovery code');
@@ -332,6 +467,22 @@ try {
   const crossRoomGrant = await proxyScopeMember.waitForEvent('proxy_token_created', (payload) => payload.requestId === 'proxy-verified-cross-room');
   assert.equal(crossRoomGrant.data.success, false, 'a global verification record must not authorize another room without the exact playlist item');
   assert.equal(crossRoomGrant.data.code, 'parse_source_denied');
+
+  for (const [sourceType, routeName, url] of [['video', 'media', verifiedVideoUrl], ['hls', 'hls', verifiedHlsUrl]]) {
+    const id = `browser-direct-${sourceType}`;
+    await proxyScopeMember.emit('playlist_add', {
+      roomCode: proxyScopeRoomCode,
+      item: { id, title: id, pageUrl: url, sourceUrl: url, sourceType, clientDirectOnly: true, requiresClientParse: true },
+    });
+    const state = await proxyScopeMember.waitForEvent('room_state', value => value.playlist?.some(item => item.id === id));
+    const item = state.data.playlist.find(value => value.id === id);
+    assert.equal(item.clientDirectOnly, true);
+    assert.equal(item.requiresClientParse, false);
+    await proxyScopeMember.emit('proxy_token_request', { requestId: id, roomCode: proxyScopeRoomCode, routeName, url });
+    const grant = await proxyScopeMember.waitForEvent('proxy_token_created', value => value.requestId === id);
+    assert.equal(grant.data.success, false, 'browser-only entries cannot turn a client probe into server proxy authority, even with a global verified record');
+    assert.equal(grant.data.code, 'parse_source_denied');
+  }
 
   await host.emit('playlist_add', {
     roomCode,
@@ -437,6 +588,33 @@ try {
   const guestMemberTokenEvent = await guest.waitForEvent('room_member_token', (payload) => payload.roomCode === roomCode && payload.memberId === 'guest-b' && payload.reconnectToken);
   const guestPermissionEvent = await guest.waitForEvent('room_permissions', (payload) => payload.roomCode === roomCode && payload.memberId === 'guest-b');
   assert.equal(guestPermissionEvent.data.canManage, false, 'ordinary members must receive an explicit read-only management status');
+  assert.equal('developerMediaAvailable' in guestPermissionEvent.data, false, 'public permissions have no developer capability');
+
+  const developerKey = 'socket-developer-test-key-'.repeat(3);
+  const developerUrl = 'https://93.184.216.34/public-unverified.mp4';
+  await host.emit('playlist_add', { roomCode, item: { id: 'developer-media-test', title: 'Developer Media', pageUrl: developerUrl, sourceUrl: developerUrl, sourceType: 'video' } });
+  await host.waitForEvent('room_state', (state) => state.playlist?.some((item) => item.id === 'developer-media-test'));
+  for (const [label, client, changes, expected] of [
+    ['missing-key', host, { developerKey: '' }, false],
+    ['wrong-key', host, { developerKey: 'wrong'.repeat(10) }, false],
+    ['missing-admin', host, { adminToken: '' }, false],
+    ['malformed-admin', host, { adminToken: {} }, false],
+    ['guest-with-keys', guest, {}, false],
+    ['changed-query', host, { url: `${developerUrl}?changed=1` }, false],
+    ['creator-valid', host, {}, false],
+  ]) {
+    const requestId = `developer-${label}`;
+    await client.emit('proxy_token_request', { requestId, roomCode, routeName: 'media', url: developerUrl, devmod: true, developerKey, adminToken: recoveredTokenEvent.data.adminToken, ...changes });
+    const result = await client.waitForEvent('proxy_token_created', (payload) => payload.requestId === requestId);
+    assert.equal(result.data.success, expected, label);
+    assert.equal(result.data.code, 'parse_source_denied', 'legacy parameters cannot bypass normal media verification');
+    assert.equal(JSON.stringify(result.data).includes(developerKey), false);
+  }
+  await proxyScopeMember.emit('proxy_token_request', { requestId: 'developer-cross-room', roomCode: proxyScopeRoomCode, routeName: 'media', url: developerUrl, devmod: true, developerKey, adminToken: proxyScopeRoom.body.adminToken });
+  assert.equal((await proxyScopeMember.waitForEvent('proxy_token_created', (payload) => payload.requestId === 'developer-cross-room')).data.success, false);
+  assert.equal(output.includes(developerKey), false, 'developer keys must never appear in logs');
+  await host.emit('playlist_delete', { roomCode, itemId: 'developer-media-test' });
+  await host.waitForEvent('room_state', (state) => !state.playlist?.some((item) => item.id === 'developer-media-test'));
 
   await host.emit('playlist_add', {
     roomCode,
@@ -1226,6 +1404,7 @@ try {
     3000,
   );
   assert.equal(delegatedPermission.data.isCreator, false, 'the successor should manage without becoming the recovery-code owner');
+  assert.equal('developerMediaAvailable' in delegatedPermission.data, false, 'delegated public permissions have no developer capability');
   await adminSuccessor.emit('room_lock_update', {
     roomCode: adminRoomCode,
     locked: true,

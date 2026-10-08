@@ -17,6 +17,7 @@ const suppressionLimit = 1000;
 const suppressedEvents = new Map<string, SuppressionEntry>();
 
 const approvedFields = {
+  session_release_decision: ['decision', 'suppressedCount'],
   playback_decision: [
     'roomFingerprint', 'actorFingerprint', 'clientType', 'action', 'decision', 'reason',
     'baseRevision', 'currentRevision', 'nextRevision', 'sourceMatch', 'clientReady',
@@ -47,6 +48,7 @@ export type StructuredEventName = keyof typeof approvedFields;
 
 const clientTypes = ['android_webview', 'android_browser', 'ios_browser', 'automation', 'mobile_other', 'desktop_browser', 'unknown'];
 const allowedStringValues: Record<StructuredEventName, Record<string, ReadonlySet<string>>> = {
+  session_release_decision: { decision: new Set(['applied', 'noop']) },
   playback_decision: {
     clientType: new Set(clientTypes),
     action: new Set(['play', 'pause', 'seek', 'rate', 'source', 'periodic', 'buffering', 'legacy', 'unknown']),

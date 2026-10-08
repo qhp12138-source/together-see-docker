@@ -384,8 +384,7 @@ export function issueMediaProxyGrant(
   if (!env.hlsProxyEnabled) throw new Error('媒体代理未启用');
   if (routeName !== 'hls' && routeName !== 'media') throw new Error('媒体代理类型无效');
   const expectedType = routeName === 'hls' ? 'hls' : 'video';
-  const allowUnlistedPublicTargets = options.allowVerifiedDirect === true
-    && isVerifiedDirectMediaUrl(rawUrl, expectedType);
+  const allowUnlistedPublicTargets = options.allowVerifiedDirect === true && isVerifiedDirectMediaUrl(rawUrl, expectedType);
   const targetUrl = assertRemoteHttpUrl(rawUrl, allowUnlistedPublicTargets).toString();
   const refUrl = rawRefUrl ? parseProxyReferrer(rawRefUrl).toString() : '';
   return createProxyGrant(routeName, targetUrl, refUrl, allowUnlistedPublicTargets, options.sessionId || '');
@@ -845,6 +844,8 @@ export function createMediaProxyRouter(fetchProxyTargetImpl: ProxyTargetFetcher 
     res.status(upstreamStatus);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
     if (upstreamStatus < 200 || upstreamStatus >= 300) {
       logFetchRejection('upstream_status', upstreamStatus);
@@ -866,7 +867,18 @@ export function createMediaProxyRouter(fetchProxyTargetImpl: ProxyTargetFetcher 
       return;
     }
 
-    const passThroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified'];
+    // A previously verified URL may later serve a document. Never publish active
+    // upstream content under the application's origin, even for verified grants.
+    const mediaMime = contentType.split(';', 1)[0].trim().toLowerCase();
+    const binaryMime = new Set(['application/octet-stream', 'binary/octet-stream', 'application/mp4', 'application/mp2t', 'application/x-mpegts']);
+    if (mediaMime && !/^(?:video|audio)\/[a-z0-9.+-]+$/.test(mediaMime) && !binaryMime.has(mediaMime)) {
+      upstream.destroy();
+      logFetchRejection('upstream_error', 502);
+      res.status(502).json({ success: false, message: '视频源返回了不支持的内容类型' });
+      return;
+    }
+    res.setHeader('Content-Type', mediaMime || 'application/octet-stream');
+    const passThroughHeaders = ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified'];
     passThroughHeaders.forEach((name) => {
       const value = getUpstreamHeader(upstream, name);
       if (value) res.setHeader(name, value);

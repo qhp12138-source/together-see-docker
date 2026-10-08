@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import WebSocket from 'ws';
 
 const serverRoot = process.cwd();
 
@@ -91,6 +92,27 @@ try {
 
   const allowedSocket = await fetch(`${baseUrl}/socket.io/?EIO=4&transport=polling&t=origin-allowed`, { headers: { origin: allowedOrigin } });
   assert.equal(allowedSocket.status, 200);
+
+  // A transport upgrade must keep the protocol negotiated by its polling session.
+  const handshake = JSON.parse((await allowedSocket.text()).slice(1));
+  for (const protocol of ['3', null]) {
+    const upgrade = new URL(baseUrl.replace('http:', 'ws:') + '/socket.io/');
+    upgrade.searchParams.set('transport', 'websocket');
+    upgrade.searchParams.set('sid', handshake.sid);
+    if (protocol !== null) upgrade.searchParams.set('EIO', protocol);
+    const status = await new Promise((resolve, reject) => {
+      const socket = new WebSocket(upgrade, { origin: allowedOrigin, handshakeTimeout: 3000 });
+      socket.once('error', reject);
+      socket.once('open', () => { socket.terminate(); reject(new Error('mismatched protocol upgrade accepted')); });
+      socket.once('unexpected-response', (_request, response) => {
+        response.resume();
+        socket.terminate();
+        resolve(response.statusCode);
+      });
+    });
+    assert.equal(status, 400, 'mismatched or missing Engine.IO revision must be rejected');
+  }
+  assert.equal((await fetch(`${baseUrl}/api/health`)).status, 200);
 
   const deniedSocket = await fetch(`${baseUrl}/socket.io/?EIO=4&transport=polling&t=origin-denied`, { headers: { origin: deniedOrigin } });
   assert.notEqual(deniedSocket.status, 200);
