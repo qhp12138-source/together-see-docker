@@ -4,11 +4,15 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const root = path.resolve('..');
+const strictArchive = process.argv.includes('--archive');
 const generated = new Set(['.git', 'node_modules', 'dist', '.artifacts', 'test-results', 'playwright-report']);
 function walk(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     if (generated.has(entry.name)) return [];
     const target = path.join(directory, entry.name);
+    // Repeated test runs create disposable stores. Strict clean-archive checks
+    // still reject them; Git-index checks also reject any tracked runtime data.
+    if (!strictArchive && entry.isDirectory() && path.relative(root, target).replaceAll('\\', '/') === 'server/data') return [];
     return entry.isDirectory() ? walk(target) : [path.relative(root, target).replaceAll('\\', '/')];
   });
 }

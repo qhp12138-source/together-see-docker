@@ -20,9 +20,9 @@ async function setup(browser, baseURL, mobile = false, width = 393, height = 852
   await page.locator('[data-playlist-form] input').fill(mediaUrl);
   await page.locator('[data-playlist-form]').evaluate(form => form.requestSubmit());
   await waitForRemoteMediaReady(page, 'Controls fixture');
-  for (const button of await page.getByRole('button', { name: '关闭提示', exact: true }).all()) {
-    if (await button.isVisible()) await button.click();
-  }
+  // Toasts expire while indexed locators are being clicked. Let setup notices
+  // finish naturally instead of waiting on a removed nth() target.
+  await expect(page.getByRole('button', { name: '关闭提示', exact: true })).toHaveCount(0);
   await page.locator('[data-room-video]').evaluate(video => { video.muted = true; });
   await page.locator('[data-room-video]').click({ position: { x: 30, y: 30 } });
   await page.locator('[data-player-play]').click();
